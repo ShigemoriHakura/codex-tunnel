@@ -216,7 +216,7 @@ func TestCLIIntegration(t *testing.T) {
 			event("response.output_text.delta", M{"item_id": "msg_1", "delta": "hello"})
 			event("response.output_item.done", M{"item": m})
 		}
-		event("response.completed", M{"response": M{"id": "resp_1", "status": "completed", "usage": M{"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}}})
+		event("response.completed", M{"response": M{"id": "resp_1", "status": "completed", "usage": M{"input_tokens": 12, "output_tokens": 3, "total_tokens": 15, "input_tokens_details": M{"cached_tokens": 4}, "output_tokens_details": M{"reasoning_tokens": 2}}}})
 	}))
 	defer mock.Close()
 	config := fmt.Sprintf(`model="gpt-5.4"
@@ -252,6 +252,7 @@ stream_max_retries=0
 	}
 	a.db.Close()
 	a = testApp(t, d)
+	hit(t, a, "PATCH", "/admin/diagnostics/settings", testAdmin, `{"capture_body":true}`, "", 200)
 	stream := `{"stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"again"}]}`
 	out = hit(t, a, "POST", "/v1/chat/completions", key, stream, sid, 200)
 	for _, want := range []string{"hello", "data: [DONE]", `"total_tokens":15`} {
@@ -292,6 +293,63 @@ stream_max_retries=0
 		if !strings.Contains(usage, want) {
 			t.Fatal(usage)
 		}
+	}
+	var logs struct {
+		Data []struct {
+			Seq       int
+			RequestID string `json:"request_id"`
+			Direction string
+		}
+	}
+	decode(t, hit(t, a, "GET", "/admin/diagnostics/logs?session="+sid, testAdmin, "", "", 200), &logs)
+	if len(logs.Data) != 4 {
+		t.Fatalf("expected two chat turns with two directions: %+v", logs)
+	}
+	for i, row := range logs.Data {
+		var detail struct {
+			Cached, Reasoning *int64
+			TTFT              *int64 `json:"ttft_ms"`
+			Cost              *float64
+			Response          *string `json:"response_body"`
+		}
+		decode(t, hit(t, a, "GET", fmt.Sprintf("/admin/diagnostics/logs/%d", row.Seq), testAdmin, "", "", 200), &detail)
+		if detail.Cached == nil || *detail.Cached != 4 || detail.Reasoning == nil || *detail.Reasoning != 2 || detail.TTFT == nil || detail.Cost == nil {
+			t.Fatalf("invalid turn metrics: %+v", detail)
+		}
+		if (i >= 2) != (detail.Response == nil) {
+			t.Fatalf("capture opt-in mismatch, row %d", i)
+		}
+		if i == 0 && (row.Direction != "ingress" || !strings.Contains(*detail.Response, "data: [DONE]")) {
+			t.Fatal("missing incoming stream preview")
+		}
+		if i%2 == 1 && (row.Direction != "egress" || row.RequestID != logs.Data[i-1].RequestID) {
+			t.Fatal("outbound request correlation failed")
+		}
+	}
+	var stats struct {
+		Summary struct {
+			Requests, Cached, Reasoning int
+			Priced                      int
+		}
+	}
+	decode(t, hit(t, a, "GET", "/admin/analytics", testAdmin, "", "", 200), &stats)
+	if stats.Summary.Requests != 3 || stats.Summary.Priced != 2 || stats.Summary.Cached < 8 {
+		t.Fatalf("unexpected ledger metrics: %+v", stats)
+	}
+	img := hit(t, a, "GET", "/admin/diagnostics/logs?search=images", testAdmin, "", "", 200)
+	var images struct {
+		Data []struct {
+			Seq     int
+			Account string
+		}
+	}
+	decode(t, img, &images)
+	if len(images.Data) != 1 || !strings.HasPrefix(images.Data[0].Account, "acct_") {
+		t.Fatal("missing pseudonymous image account")
+	}
+	imageDetail := hit(t, a, "GET", fmt.Sprintf("/admin/diagnostics/logs/%d", images.Data[0].Seq), testAdmin, "", "", 200)
+	if strings.Contains(imageDetail, png) || strings.Contains(imageDetail, "loopback-test") {
+		t.Fatal("image content or account identity in preview")
 	}
 	other, _ := newKey(t, a)
 	if s := hit(t, a, "GET", "/v1/usage", other, "", "", 200); !strings.Contains(s, `"requests":0`) {

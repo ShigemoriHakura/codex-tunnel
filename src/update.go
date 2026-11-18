@@ -37,7 +37,9 @@ func (a *app) current() (runner, error) {
 	r.bin = filepath.Join(a.cliHome, v, "node_modules/.bin/codex")
 	return r, nil
 }
-func latest(ctx context.Context) (string, error) {
+func latest(ctx context.Context) (version string, err error) {
+	start := time.Now()
+	defer func() { recordHop(ctx, "GET", "registry.npmjs.org/@openai/codex/latest", start, err) }()
 	req, e := http.NewRequestWithContext(ctx, "GET", "https://registry.npmjs.org/@openai%2fcodex/latest", nil)
 	if e != nil {
 		return "", e
@@ -54,7 +56,9 @@ func latest(ctx context.Context) (string, error) {
 	return pkg.Version, nil
 }
 func (r runner) version(ctx context.Context) (string, error) {
+	start := time.Now()
 	b, e := r.command(ctx, r.bin, "--version").Output()
+	recordHop(ctx, "exec", "codex --version", start, e)
 	return strings.TrimSpace(strings.TrimPrefix(string(b), "codex-cli ")), e
 }
 func (a *app) cliStatus(w http.ResponseWriter, r *http.Request, _ string) {
@@ -167,7 +171,10 @@ func (a *app) install(ctx context.Context, v string) error {
 	}
 	c := a.base.command(ctx, npm, "install", "--prefix", tmp, "--registry=https://registry.npmjs.org", "--ignore-scripts", "--no-audit", "--no-fund", "@openai/codex@"+v)
 	c.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + tmp, "npm_config_cache=" + filepath.Join(tmp, ".npm")}
-	if e = c.Run(); e != nil {
+	start := time.Now()
+	e = c.Run()
+	recordHop(ctx, "exec", "npm install @openai/codex", start, e)
+	if e != nil {
 		return e
 	}
 	os.RemoveAll(filepath.Join(tmp, ".npm"))

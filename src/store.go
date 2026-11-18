@@ -44,9 +44,18 @@ func openDB(dir string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+	if err = initDiagnostics(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
 }
-func rows(db *sql.DB, q string, args ...any) ([]M, error) {
+
+type querier interface {
+	Query(string, ...any) (*sql.Rows, error)
+}
+
+func rows(db querier, q string, args ...any) ([]M, error) {
 	r, e := db.Query(q, args...)
 	if e != nil {
 		return nil, e

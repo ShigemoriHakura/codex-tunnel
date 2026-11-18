@@ -23,7 +23,12 @@ jobs:
           node-version: '24'
       - run: npm install -g --ignore-scripts @openai/codex@0.170.0
       - run: TEST_CODEX_BIN="$(command -v codex)" go test -race -timeout 2m ./...
-      - run: go vet ./... && node --check src/web/app.js && node --test src/tests/i18n.test.mjs
+      - run: go vet ./...
+      - run: |
+          node --check src/web/app.js
+          node --check src/web/monitor.mjs
+          node --check src/web/trends.mjs
+          node --test src/tests/i18n.test.mjs
       - name: Compose smoke test (no upstream account)
         if: github.event_name == 'workflow_dispatch' && inputs.compose_smoke
         run: |

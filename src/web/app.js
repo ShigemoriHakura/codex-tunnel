@@ -1,3 +1,5 @@
+import { logsView, errorsView } from "./monitor.mjs";
+import { usageView } from "./trends.mjs";
 import {
   msg,
   text,
@@ -11,7 +13,7 @@ import {
 } from "./i18n.mjs";
 
 const $ = (id) => document.getElementById(id);
-const pages = ["overview", "keys", "sessions", "logs", "models", "cli", "play"];
+const pages = ["overview", "keys", "sessions", "stats", "logs", "errors", "models", "cli", "play"];
 initLanguage();
 const themePicker = $("theme");
 function applyTheme(value) {
@@ -55,9 +57,10 @@ function button(s, fn, cls) {
   };
   return b;
 }
-async function req(path, { method = "GET", data, key = admin } = {}) {
+async function req(path, { method = "GET", data, key = admin, signal } = {}) {
   return requestJSON(path, {
     method,
+    signal,
     headers: {
       Authorization: "Bearer " + key,
       ...(data ? { "Content-Type": "application/json" } : {}),
@@ -156,7 +159,10 @@ function goto(p) {
   if (p !== "logs") filter = "";
   return render();
 }
+let viewLife;
 async function render() {
+  viewLife?.abort();
+  viewLife = new AbortController();
   const current = ++epoch;
   notice("");
   writeText($("title"), msg(`nav.${page}`));
@@ -173,14 +179,14 @@ async function render() {
   const status = el("p", msg("common.loading"));
   root.append(status);
   try {
-    await views[page](root);
+    await views[page](root, viewLife.signal);
   } catch (e) {
     if (current === epoch) notice(e.localized || e.message);
   } finally {
     status.remove();
   }
 }
-const navSymbols = {overview: "▦", keys: "⚿", sessions: "▤", logs: "≡", models: "◫", cli: "›_", play: "▷"};
+const navSymbols = {overview: "▦", stats: "▥", errors: "!", keys: "⚿", sessions: "▤", logs: "≡", models: "◫", cli: "›_", play: "▷"};
 function navigate(page) {
   filter = "";
   return goto(page);
@@ -290,6 +296,7 @@ function renderQuota(data) {
   return result;
 }
 
+const monitorUI = { el, button, req, panel, table };
 const views = {
   async overview(root) {
     const [u, l] = await Promise.all([
@@ -320,7 +327,8 @@ const views = {
     );
     const tools = el("div", undefined, "overview-tools");
     root.append(tools);
-    const [latency] = panel(tools, msg("overview.latency"));
+    const [latency, latencyBar] = panel(tools, msg("overview.latency"));
+    latencyBar.append(button(msg("nav.stats"), () => goto("stats")));
     const recent = l.data.slice(0, 24).reverse();
     if (recent.length) {
       const durations = recent.map(row => row.latency_ms);
@@ -499,25 +507,14 @@ const views = {
     );
     pager(s, l.data.length);
   },
-  async logs(root) {
-    const l = await req(
-        "/admin/requests?offset=" +
-          offset +
-          "&session=" +
-          encodeURIComponent(filter),
-      ),
-      [s, b] = panel(
-        root,
-        filter ? msg("logs.filtered", { id: short(filter) }) : msg("logs.all"),
-      );
-    b.append(
-      button(filter ? msg("logs.clear") : msg("common.refresh"), () => {
-        filter = "";
-        return goto("logs");
-      }),
-    );
-    logTable(s, l.data);
-    pager(s, l.data.length);
+  logs(root, signal) {
+    return logsView(root, monitorUI, filter, signal);
+  },
+  stats(root, signal) {
+    return usageView(root, monitorUI, signal);
+  },
+  errors(root, signal) {
+    return errorsView(root, monitorUI, signal);
   },
   async models(root) {
     const [account, bar] = panel(root, msg("account.title")),

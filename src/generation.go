@@ -22,12 +22,13 @@ type chatRequest struct {
 	Stream        bool      `json:"stream"`
 	StreamOptions *struct {
 		IncludeUsage bool `json:"include_usage"`
-	} `json:"stream_options"`
+	} `json:"stream_options,omitempty"`
 }
 type imageRequest struct {
-	Model, Prompt string
-	N             *int
-	Format        string `json:"response_format"`
+	Model  string `json:"model,omitempty"`
+	Prompt string `json:"prompt"`
+	N      *int   `json:"n,omitempty"`
+	Format string `json:"response_format,omitempty"`
 }
 
 func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
@@ -39,11 +40,24 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	kind := "chat"
 	rid := id("chatcmpl-")
 	if image {
-		kind = "image"
 		rid = id("img_")
+	}
+	trace := tracing(r.Context())
+	if trace != nil {
+		trace.id = rid
+		if len(sid) <= 200 {
+			trace.session = sid
+		}
+	}
+	w.Header().Set("X-Request-ID", rid)
+	if image {
+		kind = "image"
 		var b imageRequest
 		if !body(w, r, &b) {
 			return
+		}
+		if trace != nil && trace.capture {
+			trace.reqBody = preview(b)
 		}
 		if strings.TrimSpace(b.Prompt) == "" || (b.N != nil && *b.N != 1) || (b.Format != "" && b.Format != "b64_json") || sid != "" {
 			fail(w, 400, "invalid_request", "Use a prompt, n=1, b64_json and no session for image generation")
@@ -51,10 +65,14 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		}
 		t.model = b.Model
 		t.prompt = b.Prompt
+
 	} else {
 		var b chatRequest
 		if !body(w, r, &b) {
 			return
+		}
+		if trace != nil && trace.capture {
+			trace.reqBody = preview(b)
 		}
 		if len(b.Messages) < 1 || len(b.Messages) > 256 {
 			fail(w, 400, "invalid_messages", "Provide 1–256 text messages")
@@ -70,6 +88,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			fail(w, 400, "invalid_messages", "End with a user message; send only the new user message in session mode")
 			return
 		}
+
 		t.model = b.Model
 		stream = b.Stream
 		includeUsage = b.StreamOptions != nil && b.StreamOptions.IncludeUsage
@@ -84,6 +103,10 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		fail(w, 400, "invalid_model", "Model name too long")
 		return
 	}
+	if trace != nil {
+		trace.model = t.model
+		trace.stream = &stream
+	}
 	var prior counts
 	if sid != "" {
 		if !a.lock(w, sid) {
@@ -91,7 +114,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		}
 		defer a.busy.Delete(sid)
 		var model string
-		e := a.db.QueryRow(`SELECT thread,model,last_in,last_out FROM sessions WHERE id=? AND owner=?`, sid, owner).Scan(&t.thread, &model, &prior.Input, &prior.Output)
+		e := a.db.QueryRow(`SELECT s.thread,s.model,s.last_in,s.last_out,m.cached,m.reasoning FROM sessions s LEFT JOIN session_metrics m ON s.id=m.session WHERE s.id=? AND s.owner=?`, sid, owner).Scan(&t.thread, &model, &prior.Input, &prior.Output, &prior.Cached, &prior.Reasoning)
 		if errors.Is(e, sql.ErrNoRows) {
 			fail(w, 404, "not_found", "Session not found")
 			return
@@ -156,7 +179,9 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			return send(chunk(M{"content": d}, nil))
 		}
 	}
+	upstreamStart := time.Now()
 	res, runErr := run.run(ctx, t)
+	ended := time.Now()
 	if res.model != "" {
 		model = res.model
 	}
@@ -168,19 +193,55 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			used = res.total
 		}
 	}
-	status := 200
-	if runErr != nil {
-		status = 502
-		if ctx.Err() != nil {
-			status = 504
+	status := errorStatus(ctx, runErr)
+	if trace != nil {
+		trace.model = model
+		recordHop(ctx, "stdio", "codex/app-server/turn", upstreamStart, runErr)
+		if trace.capture {
+			trace.outBody = preview(M{"model": t.model, "thread": t.thread, "input": t.prompt})
+			if image {
+				trace.resBody = preview(M{"generated": res.image != ""})
+			} else {
+				trace.resBody = preview(M{"text": res.text})
+			}
+		}
+		if runErr != nil {
+			trace.status = status
+			trace.code = "upstream_error"
+			trace.message = "Codex turn failed"
 		}
 	}
+	used.Cached = counterDelta(res.total.Cached, prior.Cached, prior.Input == 0 || res.total.Input < prior.Input)
+	used.Reasoning = counterDelta(res.total.Reasoning, prior.Reasoning, prior.Output == 0 || res.total.Output < prior.Output)
+	var ttft *int64
+	if !res.firstToken.IsZero() {
+		v := res.firstToken.Sub(start).Milliseconds()
+		ttft = &v
+	}
+	var speed *float64
+	if res.metered && used.Output >= 100 {
+		elapsed := ended.Sub(start)
+		if !res.firstToken.IsZero() && ended.Sub(res.firstToken) >= 20*time.Millisecond {
+			elapsed = ended.Sub(res.firstToken)
+		}
+		if elapsed > 0 {
+			v := float64(used.Output) / elapsed.Seconds()
+			speed = &v
+		}
+	}
+	account := accountLabel(run.home)
 	tx, e := a.db.Begin()
 	if e == nil {
 		defer tx.Rollback()
-		_, e = tx.Exec(`INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?,?,?)`, rid, owner, sid, kind, model, status, used.Input, used.Output, res.metered, time.Since(start).Milliseconds(), start.Unix())
+		_, e = tx.Exec(`INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?,?,?)`, rid, owner, sid, kind, model, status, used.Input, used.Output, res.metered, ended.Sub(start).Milliseconds(), start.Unix())
+		if e == nil {
+			_, e = tx.Exec("INSERT INTO request_metrics VALUES(?,?,?,?,?,?,?)", rid, used.Cached, used.Reasoning, ttft, speed, estimateCost(model, kind, used), account)
+		}
 		if e == nil && sid != "" && res.metered {
 			_, e = tx.Exec(`UPDATE sessions SET last_in=?,last_out=?,updated=? WHERE id=?`, res.total.Input, res.total.Output, now(), sid)
+			if e == nil {
+				_, e = tx.Exec("INSERT INTO session_metrics VALUES(?,?,?) ON CONFLICT(session) DO UPDATE SET cached=excluded.cached,reasoning=excluded.reasoning", sid, res.total.Cached, res.total.Reasoning)
+			}
 		}
 		if e == nil {
 			e = tx.Commit()
@@ -190,6 +251,9 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		if !opened {
 			internal(w, e)
 		} else {
+			if trace != nil {
+				trace.status, trace.code, trace.message = 500, "storage_error", "Could not save request usage"
+			}
 			send(M{"error": M{"code": "storage_error", "message": "Could not save request usage"}})
 		}
 		return

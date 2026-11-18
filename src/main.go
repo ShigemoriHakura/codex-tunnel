@@ -141,6 +141,10 @@ func jsonOut(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 func fail(w http.ResponseWriter, status int, code, msg string) {
+	if observed, ok := w.(*observedWriter); ok {
+		observed.trace.code = code
+		observed.trace.message = msg
+	}
 	jsonOut(w, status, M{"error": M{"code": code, "message": msg}})
 }
 func internal(w http.ResponseWriter, e error) {
@@ -171,6 +175,9 @@ func (a *app) auth(admin bool, fn clientFn) http.HandlerFunc {
 				var owner string
 				e := a.db.QueryRow(`SELECT id FROM keys WHERE hash=? AND revoked=0`, hash).Scan(&owner)
 				if e == nil {
+					if t := tracing(r.Context()); t != nil {
+						t.owner = owner
+					}
 					fn(w, r, owner)
 					return
 				}
@@ -196,6 +203,17 @@ func (a *app) routes() http.Handler {
 	api("GET /v1/sessions", a.sessions)
 	api("GET /v1/sessions/{id}/history", a.history)
 	api("DELETE /v1/sessions/{id}", a.deleteSession)
+	for _, method := range []string{"GET", "PATCH"} {
+		adm(method+" /admin/diagnostics/settings", a.logSettings)
+	}
+	for _, method := range []string{"GET", "DELETE"} {
+		adm(method+" /admin/diagnostics/logs", a.diagnosticLogs)
+	}
+	adm("GET /admin/diagnostics/logs/{seq}", a.diagnosticLogs)
+	for _, method := range []string{"GET", "POST", "DELETE"} {
+		adm(method+" /admin/diagnostics/errors", a.errorGroups)
+	}
+	adm("GET /admin/analytics", a.analytics)
 	adm("GET /admin/keys", a.keys)
 	adm("POST /admin/keys", a.keys)
 	adm("DELETE /admin/keys/{id}", a.keys)
@@ -212,12 +230,13 @@ func (a *app) routes() http.Handler {
 	adm("POST /admin/cli/update", a.cliUpdate)
 	sub, _ := fs.Sub(webFiles, "web")
 	m.Handle("GET /", http.FileServer(http.FS(sub)))
+	observed := a.observe(m)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-		m.ServeHTTP(w, r)
+		observed.ServeHTTP(w, r)
 	})
 }
 func (a *app) acquire(w http.ResponseWriter) bool {
@@ -351,10 +370,7 @@ func (a *app) models(w http.ResponseWriter, r *http.Request, _ string) {
 	jsonOut(w, 200, M{"object": "list", "data": list})
 }
 func upstream(w http.ResponseWriter, ctx context.Context, e error) {
-	status := 502
-	if ctx.Err() != nil {
-		status = 504
-	}
+	status := errorStatus(ctx, e)
 	log.Printf("CLI request failed: %v", e)
 	if errors.Is(e, errNoImage) {
 		fail(w, 502, "image_unavailable", "Codex did not return an image. Check that your login, model and quota support the built-in image tool.")

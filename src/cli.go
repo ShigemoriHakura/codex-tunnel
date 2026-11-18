@@ -47,6 +47,7 @@ type packet struct {
 	} `json:"error"`
 }
 type rpc struct {
+	ctx    context.Context
 	cmd    *exec.Cmd
 	in     io.WriteCloser
 	scan   *bufio.Scanner
@@ -80,7 +81,7 @@ func (r runner) open(ctx context.Context, image bool) (*rpc, error) {
 		cancel()
 		return nil, e
 	}
-	p := &rpc{cmd: c, in: in, scan: bufio.NewScanner(out), cancel: cancel}
+	p := &rpc{ctx: ctx, cmd: c, in: in, scan: bufio.NewScanner(out), cancel: cancel}
 	p.scan.Buffer(make([]byte, 65536), 36<<20)
 	_, e = p.call("initialize", M{"clientInfo": M{"name": "desk_tunnel", "title": "Desk Tunnel", "version": "1.0.0"}, "capabilities": M{"experimentalApi": true}}, nil)
 	if e == nil {
@@ -117,7 +118,13 @@ func (p *rpc) next() (packet, error) {
 	}
 	return v, io.ErrUnexpectedEOF
 }
-func (p *rpc) call(method string, params any, event func(packet) error) (json.RawMessage, error) {
+func (p *rpc) call(method string, params any, event func(packet) error) (reply json.RawMessage, err error) {
+	if t := tracing(p.ctx); t != nil && t.kind == "" && method != "initialize" {
+		start := time.Now()
+		defer func() {
+			recordHop(p.ctx, "stdio", method, start, err)
+		}()
+	}
 	p.seq++
 	seq := fmt.Sprint(p.seq)
 	if e := p.send(M{"id": p.seq, "method": method, "params": params}); e != nil {
@@ -186,10 +193,13 @@ func (r runner) models(ctx context.Context) ([]M, error) {
 }
 
 type counts struct {
-	Input  int64 `json:"inputTokens"`
-	Output int64 `json:"outputTokens"`
+	Input     int64  `json:"inputTokens"`
+	Output    int64  `json:"outputTokens"`
+	Cached    *int64 `json:"cachedInputTokens"`
+	Reasoning *int64 `json:"reasoningOutputTokens"`
 }
 type result struct {
+	firstToken         time.Time
 	text, image, model string
 	total              counts
 	metered            bool
@@ -266,6 +276,9 @@ func (r runner) run(ctx context.Context, t turn) (res result, err error) {
 				commentary[n.Item.ID] = true
 			}
 		case "item/agentMessage/delta":
+			if !commentary[n.ItemID] && n.Delta != "" && res.firstToken.IsZero() {
+				res.firstToken = time.Now()
+			}
 			if t.delta != nil && !commentary[n.ItemID] {
 				return t.delta(n.Delta)
 			}
