@@ -1,0 +1,26 @@
+name: Gateway checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install -g --ignore-scripts @openai/codex@0.170.0
+      - run: TEST_CODEX_BIN="$(command -v codex)" go test -race -timeout 2m ./...
+      - run: go vet ./... && node --check web/app.js
+      - name: Compose smoke test (no upstream account)
+        run: |
+          export ADMIN_TOKEN="$(openssl rand -hex 32)"
+          trap 'docker compose down -v' EXIT
+          docker compose config -q
+          docker compose up --build -d --wait
+          curl -fsS http://127.0.0.1:8080/healthz
+          curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:8080/admin/cli

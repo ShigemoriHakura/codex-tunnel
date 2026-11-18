@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+data
+bin
+desk-tunnel
+*.test
+.DS_Store
+
+/image-response.json

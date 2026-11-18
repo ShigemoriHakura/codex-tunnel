@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#112b28" />
+    <title>Desk Tunnel · 网关控制台</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div id="login" class="login">
+      <form id="signin" class="login-card">
+        <div class="brand"><b class="mark">↳</b> DESK TUNNEL</div>
+        <p class="eyebrow">GATEWAY CONSOLE</p>
+        <h1>网关控制台</h1>
+        <p>使用部署时配置的管理员令牌登录。</p>
+        <label
+          >管理员令牌<input
+            id="token"
+            type="password"
+            autocomplete="current-password"
+            required
+            autofocus /></label
+        ><button class="primary">连接网关 →</button>
+        <p id="loginError" role="alert"></p>
+      </form>
+    </div>
+    <div id="shell" hidden>
+      <aside>
+        <div class="brand"><b class="mark">↳</b> DESK TUNNEL</div>
+        <small>WORKSPACE / 网关管理</small>
+        <nav id="nav"></nav>
+        <button id="logout" class="ghost">退出管理面板</button>
+      </aside>
+      <main>
+        <header>
+          <span class="eyebrow"
+            >CONTROL PLANE <i>/</i> <span id="section"></span></span
+          ><span class="badge">● 已连接</span>
+        </header>
+        <h1 id="title"></h1>
+        <p id="desc"></p>
+        <div id="notice" role="status"></div>
+        <div id="content"></div>
+      </main>
+    </div>
+  </body>
+</html>

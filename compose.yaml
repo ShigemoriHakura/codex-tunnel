@@ -1,0 +1,31 @@
+services:
+  gateway:
+    build:
+      context: .
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-0.170.0}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PORT:-8080}:8080"
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env first}
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-4}
+    volumes:
+      - gateway_data:/srv/data
+      - codex_home:/srv/codex
+      - cli_versions:/srv/cli
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=256m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "desk-tunnel", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  gateway_data:
+  codex_home:
+  cli_versions:
