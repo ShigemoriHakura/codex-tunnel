@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,23 @@ func TestInvalidRequests(t *testing.T) {
 	hit(t, a, "POST", "/admin/cli/update", testAdmin, `{"version":"bad"}`, "", 403)
 }
 
+func TestAdminDiagnostics(t *testing.T) {
+	a := testApp(t, t.TempDir())
+	key, _ := newKey(t, a)
+	for _, path := range []string{"/admin/account", "/admin/quota", "/admin/memory"} {
+		hit(t, a, "GET", path, key, "", "", 401)
+		hit(t, a, "POST", path, testAdmin, "{}", "", 405)
+	}
+	var memory struct{ HeapBytes, RssBytes, PeakRssBytes, SampledAt int64 }
+	out := hit(t, a, "GET", "/admin/memory", testAdmin, "", "", 200)
+	if err := json.Unmarshal([]byte(out), &memory); err != nil || memory.HeapBytes <= 0 || memory.SampledAt <= 0 {
+		t.Fatal(out)
+	}
+	if runtime.GOOS == "linux" && (memory.RssBytes <= 0 || memory.PeakRssBytes < memory.RssBytes) {
+		t.Fatal(out)
+	}
+}
+
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5c8AAAAASUVORK5CYII="
 
 func TestImageScope(t *testing.T) {
@@ -129,8 +147,30 @@ func TestCLIIntegration(t *testing.T) {
 	d := t.TempDir()
 	a := testApp(t, d)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/accounts/check") {
+			jsonOut(w, 200, M{"accounts": []M{{
+				"account_id": "loopback-test", "id": "loopback-test",
+				"workspace_backend_origin": "https://" + r.Host, "account_routing_override": "NO_CONSTRAINT",
+			}}})
+			return
+		}
+		if strings.Contains(r.URL.Path, "rate-limit-reset-credits") {
+			if r.Method != "GET" || !strings.HasSuffix(r.URL.Path, "/rate-limit-reset-credits") {
+				t.Errorf("unexpected reset credit operation: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+				return
+			}
+			jsonOut(w, 200, M{"available_count": 2, "credits": []M{{
+				"id": "fixture", "reset_type": "codex_rate_limits", "status": "available",
+				"granted_at": "2023-11-14T22:13:20Z", "expires_at": nil, "title": "Test credit",
+			}}})
+			return
+		}
 		if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/usage") {
-			jsonOut(w, 200, M{"account_id": "loopback-test", "plan_type": "plus", "rate_limit": M{"allowed": true, "limit_reached": false, "primary_window": M{"used_percent": 42, "limit_window_seconds": 3600, "reset_after_seconds": 120, "reset_at": now() + 120}}})
+			jsonOut(w, 200, M{"account_id": "loopback-test", "plan_type": "plus",
+				"rate_limit_reset_credits": M{"available_count": 2},
+				"rate_limit": M{"allowed": true, "limit_reached": false,
+					"primary_window": M{"used_percent": 42, "limit_window_seconds": 3600, "reset_after_seconds": 120, "reset_at": now() + 120}}})
 			return
 		}
 		if r.Method != "POST" {
@@ -196,7 +236,13 @@ stream_max_retries=0
 	if e := os.WriteFile(filepath.Join(a.base.home, "config.toml"), []byte(config), 0600); e != nil {
 		t.Fatal(e)
 	}
+	if out := hit(t, a, "GET", "/admin/account", testAdmin, "", "", 200); !strings.Contains(out, `"account":null`) {
+		t.Fatal(out)
+	}
 	os.WriteFile(filepath.Join(a.base.home, "auth.json"), []byte(`{"OPENAI_API_KEY":"sk-local-mock-only","auth_mode":"apikey"}`), 0600)
+	if out := hit(t, a, "GET", "/admin/account", testAdmin, "", "", 200); !strings.Contains(out, `"type":"apiKey"`) {
+		t.Fatal(out)
+	}
 	key, _ := newKey(t, a)
 	sid := prop(hit(t, a, "POST", "/v1/sessions", key, `{}`, "", 201), "id")
 	chat := `{"messages":[{"role":"user","content":"Say hello"}]}`
@@ -225,7 +271,7 @@ stream_max_retries=0
 	// The pinned CLI offers the image tool only for a Codex-backend login. This
 	// deliberately unsigned, non-functional identity is confined to our loopback provider.
 	enc := base64.RawURLEncoding.EncodeToString
-	jwt := enc([]byte(`{"alg":"none"}`)) + "." + enc([]byte(`{"sub":"mock","email":"test@example.invalid"}`)) + ".x"
+	jwt := enc([]byte(`{"alg":"none"}`)) + "." + enc([]byte(`{"sub":"mock","email":"test@example.invalid","https://api.openai.com/auth":{"chatgpt_plan_type":"plus","chatgpt_account_id":"loopback-test"}}`)) + ".x"
 	auth, _ := json.Marshal(M{"auth_mode": "chatgpt", "tokens": M{"id_token": jwt, "access_token": "mock-only", "refresh_token": "mock-only", "account_id": "loopback-test"}, "last_refresh": time.Now().UTC()})
 	if e := os.WriteFile(filepath.Join(a.base.home, "auth.json"), auth, 0600); e != nil {
 		t.Fatal(e)
@@ -234,8 +280,11 @@ stream_max_retries=0
 	if !strings.Contains(out, png) {
 		t.Fatal(out)
 	}
+	if out := hit(t, a, "GET", "/admin/account", testAdmin, "", "", 200); !strings.Contains(out, `"type":"chatgpt"`) {
+		t.Fatal(out)
+	}
 	quota := hit(t, a, "GET", "/admin/quota", testAdmin, "", "", 200)
-	if !strings.Contains(quota, `"usedPercent":42`) {
+	if !strings.Contains(quota, `"usedPercent":42`) || !strings.Contains(quota, `"availableCount":2`) || !strings.Contains(quota, `"id":"fixture"`) {
 		t.Fatal(quota)
 	}
 	usage := hit(t, a, "GET", "/v1/usage", key, "", "", 200)

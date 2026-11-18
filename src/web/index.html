@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <meta name="theme-color" content="#112b28" />
+    <meta name="color-scheme" content="light dark" />
     <title data-i18n="document.title">Desk Tunnel · 网关控制台</title>
     <link rel="stylesheet" href="/style.css" />
     <script type="module" src="/app.js"></script>
@@ -11,54 +11,49 @@
   <body>
     <div id="login" class="login">
       <form id="signin" class="login-card">
-        <div class="brand"><b class="mark">↳</b> DESK TUNNEL</div>
-        <label class="language"
-          ><span data-i18n="shell.language">语言</span
-          ><select data-language></select
-        ></label>
-        <p class="eyebrow" data-i18n="shell.brandLabel">网关管理</p>
+        <div class="login-top">
+          <div class="brand"><span class="mark" aria-hidden="true"></span> Desk Tunnel</div>
+          <label class="language"><span class="sr-only" data-i18n="shell.language">语言</span><select data-language></select></label>
+        </div>
         <h1 data-i18n="login.title">网关控制台</h1>
         <p data-i18n="login.hint">使用部署时配置的管理员令牌登录。</p>
-        <label
-          ><span data-i18n="login.token">管理员令牌</span
-          ><input
-            id="token"
-            type="password"
-            autocomplete="current-password"
-            required
-            autofocus
-        /></label>
+        <label><span data-i18n="login.token">管理员令牌</span>
+          <input id="token" type="password" autocomplete="current-password" required autofocus />
+        </label>
         <button class="primary" data-i18n="login.connect">连接网关 →</button>
         <p id="loginError" role="alert"></p>
       </form>
     </div>
     <div id="shell" hidden>
       <aside>
-        <div class="brand"><b class="mark">↳</b> DESK TUNNEL</div>
-        <small data-i18n="shell.workspace">工作区 / 网关管理</small>
+        <div class="brand"><span class="mark" aria-hidden="true"></span> Desk Tunnel</div>
         <nav id="nav"></nav>
-        <button id="logout" class="ghost" data-i18n="shell.logout">
-          退出管理面板
-        </button>
+        <label class="mobile-nav"><span class="sr-only" data-i18n="shell.control">控制面板</span><select id="pagePicker"></select></label>
+        <div class="aside-foot">
+          <span class="connected" data-i18n="shell.connected">网关已连接</span>
+        </div>
       </aside>
       <main>
         <header>
-          <span class="eyebrow"
-            ><span data-i18n="shell.control">控制面板</span> <i>/</i>
-            <span id="section"></span
-          ></span>
-          <div class="bar">
-            <label class="language"
-              ><span data-i18n="shell.language">语言</span
-              ><select data-language></select
-            ></label>
-            <span class="badge" data-i18n="shell.connected">● 已连接</span>
+          <span class="console-label" data-i18n="shell.brandLabel">网关管理</span>
+          <div class="preferences">
+            <label><span class="sr-only" data-i18n="shell.theme">配色</span>
+              <select id="theme">
+                <option value="system" data-i18n="theme.system">跟随系统</option>
+                <option value="light" data-i18n="theme.light">浅色</option>
+                <option value="dark" data-i18n="theme.dark">深色</option>
+              </select>
+            </label>
+            <label class="language"><span class="sr-only" data-i18n="shell.language">语言</span><select data-language></select></label>
+          <button id="logout" class="quiet" data-i18n="shell.logout">退出管理面板</button>
           </div>
         </header>
-        <h1 id="title"></h1>
-        <p id="desc"></p>
-        <div id="notice" role="status"></div>
-        <div id="content"></div>
+        <div class="page">
+          <h1 id="title"></h1>
+          <p id="desc"></p>
+          <div id="notice" role="status"></div>
+          <div id="content"></div>
+        </div>
       </main>
     </div>
   </body>

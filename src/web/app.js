@@ -13,6 +13,18 @@ import {
 const $ = (id) => document.getElementById(id);
 const pages = ["overview", "keys", "sessions", "logs", "models", "cli", "play"];
 initLanguage();
+const themePicker = $("theme");
+function applyTheme(value) {
+  const theme = ["light", "dark"].includes(value) ? value : "system";
+  document.documentElement.dataset.theme = theme;
+  themePicker.value = theme;
+}
+try { applyTheme(localStorage.getItem("desk-tunnel.theme")); } catch { applyTheme("system"); }
+themePicker.onchange = () => {
+  applyTheme(themePicker.value);
+  try { localStorage.setItem("desk-tunnel.theme", themePicker.value); } catch { /* Preference lasts for this visit. */ }
+};
+
 let admin = "",
   page = "overview",
   offset = 0,
@@ -93,12 +105,16 @@ function panel(root, title) {
 }
 function table(root, heads, items, cols) {
   if (!items.length) {
-    root.append(el("p", msg("common.empty")));
+    root.append(el("p", msg("common.empty"), "empty"));
     return;
   }
   const t = el("table"),
     tr = el("tr");
-  for (const h of heads) tr.append(el("th", h));
+  for (const h of heads) {
+    const cell = el("th", h);
+    cell.scope = "col";
+    tr.append(cell);
+  }
   t.createTHead().append(tr);
   const body = t.createTBody();
   for (const i of items) {
@@ -110,7 +126,9 @@ function table(root, heads, items, cols) {
       else writeText(td, v ?? "—");
     }
   }
-  root.append(t);
+  const scroll = el("div", undefined, "table-scroll");
+  scroll.append(t);
+  root.append(scroll);
 }
 const short = (s) => (s ? s.slice(0, 13) + "…" : "—");
 function pager(root, len) {
@@ -143,19 +161,13 @@ async function render() {
   notice("");
   writeText($("title"), msg(`nav.${page}`));
   writeText($("desc"), msg(`desc.${page}`));
-  writeText($("section"), msg(`nav.${page}`));
-  $("nav").replaceChildren(
-    ...pages.map((k) =>
-      button(
-        msg(`nav.${k}`),
-        () => {
-          filter = "";
-          return goto(k);
-        },
-        k === page ? "active" : "",
-      ),
-    ),
-  );
+  $("pagePicker").value = page;
+  for (const entry of $("nav").children) {
+    const selected = entry.dataset.page === page;
+    entry.classList.toggle("active", selected);
+    if (selected) entry.setAttribute("aria-current", "page");
+    else entry.removeAttribute("aria-current");
+  }
   const root = el("div");
   $("content").replaceChildren(root);
   const status = el("p", msg("common.loading"));
@@ -168,6 +180,24 @@ async function render() {
     status.remove();
   }
 }
+const navSymbols = {overview: "▦", keys: "⚿", sessions: "▤", logs: "≡", models: "◫", cli: "›_", play: "▷"};
+function navigate(page) {
+  filter = "";
+  return goto(page);
+}
+for (const key of pages) {
+  const entry = button(msg(`nav.${key}`), () => navigate(key));
+  const icon = el("span", navSymbols[key], "nav-icon");
+  icon.setAttribute("aria-hidden", "true");
+  entry.prepend(icon);
+  entry.dataset.page = key;
+  $("nav").append(entry);
+  const option = el("option", msg(`nav.${key}`));
+  option.value = key;
+  $("pagePicker").append(option);
+}
+$("pagePicker").onchange = () => navigate($("pagePicker").value);
+
 function logTable(root, items) {
   table(
     root,
@@ -184,7 +214,7 @@ function logTable(root, items) {
       (i) => dateTime(i.created),
       (i) => (i.key_name || short(i.owner)) + " / " + i.kind,
       "model",
-      "status",
+      (i) => el("span", i.status, i.status >= 400 ? "status problem" : "status"),
       (i) =>
         i.metered
           ? () => `${number(i.input)()} / ${number(i.output)()}`
@@ -193,13 +223,80 @@ function logTable(root, items) {
     ],
   );
 }
+async function loadPanel(target, load) {
+  target.replaceChildren(el("p", msg("common.loading")));
+  try {
+    const result = await load();
+    target.replaceChildren(result);
+  } catch (e) {
+    target.replaceChildren(el("p", e.localized || e.message));
+  }
+}
+
+function quotaWindow(minutes, index) {
+  if (!minutes) return msg("quota.window", { n: number(index + 1) });
+  if (minutes % 1440 === 0) return msg("quota.days", { n: number(minutes / 1440) });
+  if (minutes % 60 === 0) return msg("quota.hours", { n: number(minutes / 60) });
+  return msg("quota.minutes", { n: number(minutes) });
+}
+function renderQuota(data) {
+  const result = document.createDocumentFragment();
+  const buckets = { ...data.rateLimitsByLimitId };
+  const main = data.rateLimits;
+  if (main) buckets[main.limitId || "codex"] ??= main;
+  for (const [name, bucket] of Object.entries(buckets)) {
+    if (!bucket) continue;
+    for (const [index, slot] of [bucket.primary, bucket.secondary].entries()) {
+      if (!slot) continue;
+      const label = el("label", msg("quota.used", {
+        bucket: bucket.limitName || name,
+        window: quotaWindow(slot.windowDurationMins, index),
+        percent: percent(slot.usedPercent),
+      }));
+      label.className = "quota-window";
+      const meter = el("progress");
+      meter.max = 100;
+      meter.value = slot.usedPercent;
+      label.append(meter);
+      if (slot.resetsAt != null)
+        label.append(el("small", msg("quota.reset", { time: dateTime(slot.resetsAt) })));
+      result.append(label);
+    }
+  }
+  if (!result.childElementCount) result.append(el("p", msg("quota.noWindows")));
+  const cards = data.rateLimitResetCredits;
+  const cardHeader = el("div", undefined, "card-heading");
+  cardHeader.append(el("h3", msg("quota.cards")));
+  if (Number.isInteger(cards?.availableCount)) {
+    cardHeader.append(el("span", msg("quota.cardCount", { n: number(cards.availableCount) }), "status"));
+  } else {
+    cardHeader.append(el("small", msg("quota.cardsUnknown")));
+  }
+  result.append(cardHeader);
+  if (cards && Array.isArray(cards.credits) && cards.credits.length) {
+    table(result, [msg("col.name"), msg("col.status"), msg("quota.granted"), msg("quota.expires")],
+      cards.credits, [
+        (c) => c.title || c.description || c.id,
+        (c) => hasMessage(`card.${c.status}`) ? msg(`card.${c.status}`) : c.status,
+        (c) => c.grantedAt != null ? dateTime(c.grantedAt) : "—",
+        (c) => c.expiresAt != null ? dateTime(c.expiresAt) : "—",
+      ]);
+  } else if (cards?.availableCount > 0) {
+    result.append(el("small", msg("quota.noCardDetails")));
+  }
+  const raw = el("details");
+  raw.append(el("summary", msg("quota.raw")), el("pre", JSON.stringify(data, null, 2)));
+  result.append(raw);
+  return result;
+}
+
 const views = {
   async overview(root) {
     const [u, l] = await Promise.all([
       req("/admin/usage"),
       req("/admin/requests"),
     ]);
-    const grid = el("div", undefined, "grid");
+    const grid = el("div", undefined, "stats");
     for (const [k, label] of Object.entries({
       requests: msg("usage.requests"),
       input_tokens: msg("usage.input"),
@@ -218,8 +315,48 @@ const views = {
           errors: number(u.errors),
           unmetered: number(u.unmetered_requests),
         }),
+        "summary",
       ),
     );
+    const tools = el("div", undefined, "overview-tools");
+    root.append(tools);
+    const [latency] = panel(tools, msg("overview.latency"));
+    const recent = l.data.slice(0, 24).reverse();
+    if (recent.length) {
+      const durations = recent.map(row => row.latency_ms);
+      const peak = Math.max(...durations);
+      const average = Math.round(durations.reduce((sum, ms) => sum + ms, 0) / durations.length);
+      const chart = el("div", undefined, "latency-bars");
+      chart.setAttribute("aria-hidden", "true");
+      for (const ms of durations) {
+        const bar = el("span");
+        bar.style.height = `${ms / Math.max(peak, 1) * 100}%`;
+        bar.title = `${ms} ms`;
+        chart.append(bar);
+      }
+      latency.append(chart, el("p", msg("overview.sample", {
+        n: number(recent.length), average: number(average), peak: number(peak),
+      })));
+    } else {
+      latency.append(el("p", msg("overview.noLatency"), "empty"));
+    }
+    const [api, apiBar] = panel(tools, msg("overview.endpoint"));
+    const baseURL = new URL("/v1", location.origin).href;
+    const address = el("code", baseURL, "endpoint");
+    apiBar.append(button(msg("overview.copy"), async () => {
+      try {
+        await navigator.clipboard.writeText(baseURL);
+        notice(msg("overview.copied"));
+      } catch {
+        const range = document.createRange();
+        range.selectNodeContents(address);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        notice(msg("overview.selected"));
+      }
+    }));
+    api.append(el("p", msg("overview.endpointHint")), address);
     const [s, bar] = panel(root, msg("usage.recent"));
     bar.append(button(msg("usage.all"), () => goto("logs")));
     logTable(s, l.data.slice(0, 8));
@@ -383,64 +520,49 @@ const views = {
     pager(s, l.data.length);
   },
   async models(root) {
-    const [s, b] = panel(root, msg("models.available"));
-    b.append(button(msg("models.refresh"), render));
-    const [q, qb] = panel(root, msg("quota.title")),
-      out = el("pre"),
-      windows = el("div"),
-      raw = el("details");
-    raw.hidden = true;
-    raw.append(el("summary", msg("quota.raw")), out);
-    qb.append(
-      button(msg("quota.query"), async () => {
-        const data = await req("/admin/quota");
-        out.textContent = JSON.stringify(data, null, 2);
-        raw.hidden = false;
-        windows.replaceChildren();
-        const buckets = Object.keys(data.rateLimitsByLimitId || {}).length
-          ? data.rateLimitsByLimitId
-          : { codex: data.rateLimits };
-        for (const [name, bucket] of Object.entries(buckets)) {
-          if (!bucket) continue;
-          for (const [index, slot] of [
-            bucket.primary,
-            bucket.secondary,
-          ].entries()) {
-            if (!slot) continue;
-            const label = el(
-              "label",
-              msg("quota.used", {
-                bucket: bucket.limitName || name,
-                window: slot.windowDurationMins
-                  ? msg("quota.minutes", { n: number(slot.windowDurationMins) })
-                  : msg("quota.window", { n: number(index + 1) }),
-                percent: percent(slot.usedPercent),
-              }),
-            );
-            const meter = el("progress");
-            meter.max = 100;
-            meter.value = slot.usedPercent;
-            label.append(meter);
-            if (slot.resetsAt)
-              label.append(
-                el(
-                  "small",
-                  msg("quota.reset", { time: dateTime(slot.resetsAt) }),
-                ),
-              );
-            windows.append(label);
-          }
+    const [account, bar] = panel(root, msg("account.title")),
+      accountBody = el("div"),
+      [quota] = panel(root, msg("quota.title")),
+      quotaBody = el("div"),
+      [models, modelBar] = panel(root, msg("models.available")),
+      modelBody = el("div");
+    account.append(accountBody);
+    quota.append(quotaBody);
+    models.append(modelBody);
+    const loadAccount = async () => {
+      let skipQuota;
+      quotaBody.replaceChildren(el("p", msg("common.loading")));
+      await loadPanel(accountBody, async () => {
+        const { account, requiresOpenaiAuth } = await req("/admin/account");
+        if (!account) {
+          skipQuota = msg(requiresOpenaiAuth ? "account.loginHint" : "quota.unsupported");
+          return el("p", msg(requiresOpenaiAuth ? "account.signedOut" : "account.external"));
         }
-      }),
-    );
-    q.append(el("p", msg("quota.hint")), windows, raw);
-    const m = await req("/admin/models");
-    table(
-      s,
-      [msg("col.modelId"), msg("col.displayName"), msg("common.default")],
-      m.data,
-      ["id", "name", (i) => (i.is_default ? msg("common.yes") : "—")],
-    );
+        if (account.type !== "chatgpt") skipQuota = msg("quota.unsupported");
+        return el("p", msg("account.signedIn", {
+          identity: [account.type, account.email, account.workspaceName, account.planType]
+            .filter(Boolean).join(" · "),
+        }));
+      });
+      if (!root.isConnected) return;
+      if (skipQuota) quotaBody.replaceChildren(el("p", skipQuota));
+      else await loadPanel(quotaBody, async () => renderQuota(await req("/admin/quota")));
+    };
+    const loadModels = () => loadPanel(modelBody, async () => {
+      const list = document.createDocumentFragment();
+      const m = await req("/admin/models");
+      table(list, [msg("col.modelId"), msg("col.displayName"), msg("common.default")],
+        m.data, ["id", "name", (i) => (i.is_default ? msg("common.yes") : "—")]);
+      return list;
+    });
+    const refresh = button(msg("quota.query"), loadAccount);
+    bar.append(refresh);
+    refresh.disabled = true;
+    await loadAccount();
+    refresh.disabled = false;
+    if (!root.isConnected) return;
+    await loadModels();
+    modelBar.append(button(msg("models.refresh"), loadModels));
   },
   async cli(root) {
     const [s, b] = panel(root, msg("cli.title"));
@@ -496,6 +618,21 @@ const views = {
       );
   },
   async play(root) {
+    const [memory, memoryBar] = panel(root, msg("memory.title")),
+      reading = el("div");
+    memory.append(reading);
+    memoryBar.append(button(msg("memory.measure"), () => loadPanel(reading, async () => {
+      const sample = await req("/admin/memory");
+      const values = document.createDocumentFragment();
+      values.append(el("small", msg("memory.sample", { time: dateTime(sample.sampledAt) })));
+      for (const [field, label] of [
+        ["heapBytes", "memory.heap"], ["rssBytes", "memory.rss"], ["peakRssBytes", "memory.peak"],
+      ]) {
+        if (sample[field] != null)
+          values.append(el("p", msg(label, { mib: number(Math.round(sample[field] / 1048576 * 100) / 100) })));
+      }
+      return values;
+    })));
     const [s] = panel(root, msg("play.send")),
       [lk, key] = field(msg("play.key"), "password"),
       [lm, model] = field(msg("play.model")),

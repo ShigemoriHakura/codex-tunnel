@@ -205,7 +205,9 @@ func (a *app) routes() http.Handler {
 	adm("GET /admin/sessions/{id}/history", a.history)
 	adm("DELETE /admin/sessions/{id}", a.deleteSession)
 	adm("GET /admin/models", a.models)
-	adm("GET /admin/quota", a.quota)
+	adm("GET /admin/account", a.accountRead)
+	adm("GET /admin/quota", a.accountRead)
+	adm("GET /admin/memory", memoryUsage)
 	adm("GET /admin/cli", a.cliStatus)
 	adm("POST /admin/cli/update", a.cliUpdate)
 	sub, _ := fs.Sub(webFiles, "web")
@@ -360,7 +362,7 @@ func upstream(w http.ResponseWriter, ctx context.Context, e error) {
 	}
 	fail(w, status, "upstream_error", "Codex CLI unavailable or request failed; check login, model support and quota")
 }
-func (a *app) quota(w http.ResponseWriter, r *http.Request, _ string) {
+func (a *app) accountRead(w http.ResponseWriter, r *http.Request, _ string) {
 	if !a.acquire(w) {
 		return
 	}
@@ -378,7 +380,29 @@ func (a *app) quota(w http.ResponseWriter, r *http.Request, _ string) {
 		return
 	}
 	defer p.close()
-	b, e := p.call("account/rateLimits/read", nil, nil)
+	if r.URL.Path == "/admin/account" {
+		b, err := p.call("account/read", M{"refreshToken": false}, nil)
+		if err != nil {
+			upstream(w, ctx, err)
+			return
+		}
+		var status struct {
+			Account *struct {
+				Type          string `json:"type"`
+				Email         string `json:"email,omitempty"`
+				PlanType      string `json:"planType,omitempty"`
+				WorkspaceName string `json:"workspaceName,omitempty"`
+			} `json:"account"`
+			RequiresOpenAIAuth bool `json:"requiresOpenaiAuth"`
+		}
+		if err := json.Unmarshal(b, &status); err != nil {
+			upstream(w, ctx, err)
+			return
+		}
+		jsonOut(w, 200, status)
+		return
+	}
+	b, e := p.call("account/rateLimits/read", M{"excludeResetCreditDetails": false}, nil)
 	if e != nil {
 		upstream(w, ctx, e)
 		return
