@@ -15,7 +15,7 @@ jobs:
           node-version: '24'
       - run: npm install -g --ignore-scripts @openai/codex@0.170.0
       - run: TEST_CODEX_BIN="$(command -v codex)" go test -race -timeout 2m ./...
-      - run: go vet ./... && node --check web/app.js
+      - run: go vet ./... && node --check src/web/app.js
       - name: Compose smoke test (no upstream account)
         run: |
           export ADMIN_TOKEN="$(openssl rand -hex 32)"

@@ -2,8 +2,8 @@ FROM golang:1.25-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
-RUN CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /out/desk-tunnel .
+COPY src/ ./src/
+RUN CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /out/desk-tunnel ./src
 
 FROM node:24-bookworm-slim
 ARG CODEX_VERSION=0.170.0

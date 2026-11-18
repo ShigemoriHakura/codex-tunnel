@@ -89,6 +89,8 @@ curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
 
 ## 本地开发与验证
 
+Go 服务与测试位于 `src/`，嵌入式管理面板位于 `src/web/`。以下命令均从仓库根目录执行。
+
 需要 Go 1.24.3+、C 编译器（SQLite 使用 CGO）、已安装的官方 Codex CLI。支持 macOS / Linux。
 
 ```sh
@@ -96,7 +98,7 @@ export ADMIN_TOKEN="$(openssl rand -hex 32)"
 export DATA_DIR="$PWD/data" CODEX_HOME="$PWD/data/codex"
 mkdir -p "$CODEX_HOME"
 codex -c 'cli_auth_credentials_store="file"' login --device-auth
-go run .
+go run ./src
 ```
 
 本机默认监听 `127.0.0.1:8080`。可指定 `CODEX_BIN` 的绝对路径。若不设置 `CLI_INSTALL_DIR`，面板可检查但不会修改本机 CLI；启用托管更新请将其设为专用可写的绝对目录，并安装 npm。
