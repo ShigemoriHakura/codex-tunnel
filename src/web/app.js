@@ -27,8 +27,7 @@ themePicker.onchange = () => {
   try { localStorage.setItem("desk-tunnel.theme", themePicker.value); } catch { /* Preference lasts for this visit. */ }
 };
 
-let admin = "",
-  page = "overview",
+let page = "overview",
   offset = 0,
   filter = "",
   epoch = 0;
@@ -57,16 +56,22 @@ function button(s, fn, cls) {
   };
   return b;
 }
-async function req(path, { method = "GET", data, key = admin, signal } = {}) {
-  return requestJSON(path, {
-    method,
-    signal,
-    headers: {
-      Authorization: "Bearer " + key,
-      ...(data ? { "Content-Type": "application/json" } : {}),
-    },
-    body: data ? JSON.stringify(data) : undefined,
-  });
+const consoleHeaders = { "X-Desk-Console": "1" };
+let sessionRevision = 0;
+async function req(path, { method = "GET", data, signal } = {}) {
+  const revision = sessionRevision;
+  try {
+    return await requestJSON(path, {
+      method, signal, credentials: "same-origin",
+      headers: { ...consoleHeaders, ...(data ? { "Content-Type": "application/json" } : {}) },
+      body: data ? JSON.stringify(data) : undefined,
+    });
+  } catch (err) {
+    if (err.status === 401 && revision === sessionRevision && !$("shell").hidden) {
+      showLogin(msg("login.expired"));
+    }
+    throw err;
+  }
 }
 async function requestJSON(path, options) {
   let r;
@@ -155,6 +160,7 @@ function pager(root, len) {
 }
 function goto(p) {
   page = p;
+  try { sessionStorage.setItem("desk-tunnel.page", p); } catch { /* Storage is optional. */ }
   offset = 0;
   if (p !== "logs") filter = "";
   return render();
@@ -700,19 +706,81 @@ const views = {
     s.append(lk, lm, ls, lp, tools, out, image);
   },
 };
-$("signin").onsubmit = async (e) => {
-  e.preventDefault();
-  admin = $("token").value;
+function showLogin(message = "") {
+  sessionRevision++;
+  epoch++;
+  viewLife?.abort();
+  $("sessionCheck").hidden = true;
+  $("shell").hidden = true;
+  $("login").hidden = false;
+  $("content").replaceChildren();
+  $("notice").replaceChildren();
+  $("token").value = "";
+  filter = "";
+  writeText($("loginError"), message);
+}
+
+async function enterConsole() {
+  sessionRevision++;
+  $("token").value = "";
+  $("sessionCheck").hidden = true;
+  $("login").hidden = true;
+  $("shell").hidden = false;
+  let target;
+  try { target = sessionStorage.getItem("desk-tunnel.page"); } catch { /* Storage is optional. */ }
+  await goto(pages.includes(target) ? target : "overview");
+}
+
+async function checkSession(initial = false) {
+  const revision = sessionRevision;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    await req("/admin/usage");
-    $("token").value = "";
-    writeText($("loginError"), "");
-    $("login").hidden = true;
-    $("shell").hidden = false;
-    await goto("overview");
+    const state = await requestJSON("/admin/session", { credentials: "same-origin", signal: controller.signal });
+    if (revision !== sessionRevision) return;
+    if (state.authenticated) {
+      if ($("shell").hidden) await enterConsole();
+    } else if (initial || !$("shell").hidden) {
+      showLogin(initial ? "" : msg("login.expired"));
+    }
   } catch (err) {
-    admin = "";
+    if (revision === sessionRevision && initial) showLogin(err.localized || err.message);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+$("signin").onsubmit = async (event) => {
+  event.preventDefault();
+  const submit = $("signin").querySelector("button");
+  submit.disabled = true;
+  sessionRevision++;
+  try {
+    await requestJSON("/admin/session", {
+      method: "POST", credentials: "same-origin",
+      headers: { ...consoleHeaders, Authorization: "Bearer " + $("token").value },
+    });
+    await enterConsole();
+  } catch (err) {
     writeText($("loginError"), err.localized || err.message);
+  } finally {
+    submit.disabled = false;
   }
 };
-$("logout").onclick = () => location.reload();
+$("logout").onclick = async () => {
+  $("logout").disabled = true;
+  try {
+    await req("/admin/session", {method:"DELETE"});
+    try { sessionStorage.removeItem("desk-tunnel.page"); } catch { /* Storage is optional. */ }
+    showLogin();
+  } catch (err) {
+    notice(err.localized || err.message);
+  } finally {
+    $("logout").disabled = false;
+  }
+};
+window.addEventListener("pageshow", (event) => { if (event.persisted) checkSession(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !$("shell").hidden) checkSession();
+});
+checkSession(true);

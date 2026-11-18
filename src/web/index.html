@@ -9,14 +9,15 @@
     <script type="module" src="/app.js"></script>
   </head>
   <body>
-    <div id="login" class="login">
+    <div id="sessionCheck" class="login" role="status" data-i18n="common.loading">正在加载…</div>
+    <div id="login" class="login" hidden>
       <form id="signin" class="login-card">
         <div class="login-top">
           <div class="brand"><span class="mark" aria-hidden="true"></span> Desk Tunnel</div>
           <label class="language"><span class="sr-only" data-i18n="shell.language">语言</span><select data-language></select></label>
         </div>
         <h1 data-i18n="login.title">网关控制台</h1>
-        <p data-i18n="login.hint">使用部署时配置的管理员令牌登录。</p>
+        <p data-i18n="login.hint">使用管理员令牌登录，此浏览器将保持登录 7 天。</p>
         <label><span data-i18n="login.token">管理员令牌</span>
           <input id="token" type="password" autocomplete="current-password" required autofocus />
         </label>

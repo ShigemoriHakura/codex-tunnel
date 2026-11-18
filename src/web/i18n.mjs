@@ -45,7 +45,7 @@ export const dateTime = (unix) => () =>
   new Date(unix * 1000).toLocaleString(language);
 export function uiError(label, status) {
   const localized = () => (status ? `${status} · ` : "") + resolve(label);
-  return Object.assign(new Error(localized()), { localized });
+  return Object.assign(new Error(localized()), { localized, status });
 }
 
 // Keep the text node, not the whole element, as the update target: labels may also

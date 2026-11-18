@@ -106,7 +106,7 @@ func (w *observedWriter) Write(b []byte) (int, error) {
 func (a *app) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if !(strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/admin/")) || strings.HasPrefix(path, "/admin/diagnostics") || path == "/admin/analytics" {
+		if !(strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/admin/")) || strings.HasPrefix(path, "/admin/diagnostics") || path == "/admin/analytics" || path == "/admin/session" {
 			next.ServeHTTP(w, r)
 			return
 		}

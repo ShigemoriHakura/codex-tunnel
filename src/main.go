@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"database/sql"
 	"embed"
@@ -163,28 +162,38 @@ func body(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 func (a *app) auth(admin bool, fn clientFn) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if ok && key != "" {
-			hash := digest(key)
-			if admin {
-				if subtle.ConstantTimeCompare([]byte(hash), []byte(a.admin)) == 1 {
+		if admin {
+			if r.Header.Get("Authorization") != "" {
+				if a.adminBearer(r) {
 					fn(w, r, "")
 					return
 				}
 			} else {
-				var owner string
-				e := a.db.QueryRow(`SELECT id FROM keys WHERE hash=? AND revoked=0`, hash).Scan(&owner)
-				if e == nil {
-					if t := tracing(r.Context()); t != nil {
-						t.owner = owner
+				ok, err := a.hasConsoleSession(r)
+				if err != nil {
+					internal(w, err)
+					return
+				}
+				if ok {
+					if allowConsoleWrite(w, r) {
+						fn(w, r, "")
 					}
-					fn(w, r, owner)
 					return
 				}
-				if !errors.Is(e, sql.ErrNoRows) {
-					internal(w, e)
-					return
+			}
+		} else if key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && key != "" {
+			var owner string
+			e := a.db.QueryRow(`SELECT id FROM keys WHERE hash=? AND revoked=0`, digest(key)).Scan(&owner)
+			if e == nil {
+				if t := tracing(r.Context()); t != nil {
+					t.owner = owner
 				}
+				fn(w, r, owner)
+				return
+			}
+			if !errors.Is(e, sql.ErrNoRows) {
+				internal(w, e)
+				return
 			}
 		}
 		fail(w, 401, "unauthorized", "Valid bearer token required")
@@ -194,6 +203,9 @@ func (a *app) routes() http.Handler {
 	m := http.NewServeMux()
 	api := func(path string, fn clientFn) { m.HandleFunc(path, a.auth(false, fn)) }
 	adm := func(path string, fn clientFn) { m.HandleFunc(path, a.auth(true, fn)) }
+	for _, method := range []string{"GET", "POST", "DELETE"} {
+		m.HandleFunc(method+" /admin/session", a.consoleSession)
+	}
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonOut(w, 200, M{"status": "ok"}) })
 	api("GET /v1/models", a.models)
 	api("POST /v1/chat/completions", a.generate)
