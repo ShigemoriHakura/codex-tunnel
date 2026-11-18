@@ -24,7 +24,11 @@ printf '%s' "$OPENAI_API_KEY" | docker compose exec -T gateway codex -c 'cli_aut
 
 **文本、配额和生图是不同的上游能力。** 固定版 CLI 的内置生图工具需要支持它的 Codex 后端登录、模型与账户；普通 API-key 登录能聊天，并不意味着可用该工具。配额查询也可能不受当前账户支持。网关不伪造图片或额度，不会静默切换到另一个计费账户。
 
-## 在高位端口对外提供 HTTPS
+## 在高位端口对外提供 HTTP
+
+在 `.env` 使用 `BIND_IP=0.0.0.0` 和 `PORT=56439`，仅使用基础 `compose.yaml`（不要启用 `compose.https.yaml`），然后运行 `docker compose up -d`。访问 `http://服务器IP:56439/`，API 前缀为 `/v1`。本项目只发布这一个 TCP 端口。**HTTP 不加密管理令牌、客户端密钥或对话内容**；建议通过 VPN、SSH 隧道或限制来源 IP 访问。不配置 `BIND_IP` 时仍仅绑定回环地址。
+
+## 在高位端口对外提供 HTTPS（可选）
 
 默认仅在回环地址提供 HTTP。需要外部访问时，使用支持 `!override` 的 Compose 版本，将证书链和私钥分别放入 `tls/server.crt`、`tls/server.key`（私钥不入库，须允许容器内 UID/GID 1000 读取）。在服务器 `.env` 中设置：
 
