@@ -14,7 +14,7 @@ docker compose exec gateway codex -c 'cli_auth_credentials_store="file"' login -
 docker compose exec gateway codex -c 'cli_auth_credentials_store="file"' login status
 ```
 
-打开 `http://127.0.0.1:8080`，用 `.env` 中的 `ADMIN_TOKEN` 登录。到 **访问密钥 → 创建密钥**，立即复制一次性显示的 `dt_…`。SDK 的 `base_url` 使用 `http://127.0.0.1:8080/v1`，`api_key` 使用此客户端密钥，**不是**管理员令牌或上游凭据。更改 `.env` 后通过 `docker compose up -d` 重建容器配置。
+打开 `http://127.0.0.1:56439`，用 `.env` 中的 `ADMIN_TOKEN` 登录。到 **访问密钥 → 创建密钥**，立即复制一次性显示的 `dt_…`。SDK 的 `base_url` 使用 `http://127.0.0.1:56439/v1`，`api_key` 使用此客户端密钥，**不是**管理员令牌或上游凭据。更改 `.env` 后通过 `docker compose up -d` 重建容器配置。
 
 也可用 API key 登录 CLI（从本机环境变量经 stdin 输入，不要把密钥写进命令参数）：
 
@@ -23,6 +23,18 @@ printf '%s' "$OPENAI_API_KEY" | docker compose exec -T gateway codex -c 'cli_aut
 ```
 
 **文本、配额和生图是不同的上游能力。** 固定版 CLI 的内置生图工具需要支持它的 Codex 后端登录、模型与账户；普通 API-key 登录能聊天，并不意味着可用该工具。配额查询也可能不受当前账户支持。网关不伪造图片或额度，不会静默切换到另一个计费账户。
+
+## 在高位端口对外提供 HTTPS
+
+默认仅在回环地址提供 HTTP。需要外部访问时，使用支持 `!override` 的 Compose 版本，将证书链和私钥分别放入 `tls/server.crt`、`tls/server.key`（私钥不入库，须允许容器内 UID/GID 1000 读取）。在服务器 `.env` 中设置：
+
+```dotenv
+COMPOSE_FILE=compose.yaml:compose.https.yaml
+PORT=56439
+TLS_HEALTH_SERVER_NAME=替换为证书SAN包含的公网IP或域名
+```
+
+执行 `docker compose config -q && docker compose up --build -d --wait`。仅允许所需来源访问此 TCP 端口。公网模式只监听一个 HTTPS 端口，无 HTTP 跳转；容器内外端口相同，范围 49152–65535。客户端使用 `https://主机:端口/` 和 `https://主机:端口/v1`。自签证书应通过受信任渠道核对 SHA-256 指纹并显式信任，不要关闭证书校验；换证后 `docker compose up -d --force-recreate`。
 
 ## 面板与会话
 
@@ -45,7 +57,7 @@ printf '%s' "$OPENAI_API_KEY" | docker compose exec -T gateway codex -c 'cli_aut
 所有 `/v1/*` 请求都需要 `Authorization: Bearer <客户端密钥>`。以下假设已设置 `DT_KEY`：
 
 ```sh
-BASE=http://127.0.0.1:8080
+BASE=http://127.0.0.1:56439
 curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/models"
 
 # 1. 建立会话；复制返回的 id 到 SID
@@ -85,7 +97,7 @@ curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
 - Compose 默认仅发布到宿主机回环地址。远程访问请自行部署 HTTPS、网络访问控制、请求限速和预算限制；不要直接把管理面板暴露给匿名互联网。反向代理需关闭 SSE 缓冲，设置足够的响应超时。
 - 容器采用非 root 用户、只读根文件系统、不授予额外 capabilities，不挂载宿主机仓库、个人 `~/.codex` 或 Docker socket。**使用专用且无自定义 MCP、插件、技能的 CLI 配置目录**。每个推理进程由 Go 通过 stdio 调用，不拼接 shell 命令；线程使用只读沙箱、禁用审批和本地工具环境。管理员令牌不传入 CLI。
 - 三个命名卷分别存 SQLite（WAL）、Codex 登录凭据与原始历史、托管 CLI 版本。备份前先停服务，三个卷一起备份并加密保护；不要对这些目录做静态文件发布。日志、原始历史及 CLI 生成图片没有自动过期，请制定磁盘容量与保留策略。`docker compose down` 保留卷，`down -v` **会删除数据和登录状态**。
-- 只支持一个网关实例使用同一组卷（会话锁与并发池在进程内）。`MAX_CONCURRENT` 默认 4，可设 1–64。`PORT` 默认 8080。控制台登录令牌仅驻留页面内存，刷新需重新登录；轮换 `ADMIN_TOKEN` 不改变现有客户端密钥。
+- 只支持一个网关实例使用同一组卷（会话锁与并发池在进程内）。`MAX_CONCURRENT` 默认 4，可设 1–64。`PORT` 默认 56439。控制台登录令牌仅驻留页面内存，刷新需重新登录；轮换 `ADMIN_TOKEN` 不改变现有客户端密钥。
 - 镜像默认固定 `@openai/codex@0.170.0`。面板安装只接受当次查询到的 npm 官方稳定版本，安装到独立目录且禁用 npm 生命周期脚本，验证版本、协议字段与握手后再切换。运行中的请求继续使用原版本。失败不切换，可用“恢复镜像内置版本”回退。CLI 新版可能迁移其内部存储，升级前应备份；二进制回退不等于数据回滚。
 - `502` 优先检查 `docker compose logs gateway`、CLI 登录状态、所选模型及账户权限；`504` 表示请求上下文取消或超时。请求元数据只统计已进入推理执行的请求，不统计鉴权拒绝、校验错误或繁忙拒绝。
 
@@ -103,7 +115,7 @@ codex -c 'cli_auth_credentials_store="file"' login --device-auth
 go run ./src
 ```
 
-本机默认监听 `127.0.0.1:8080`。可指定 `CODEX_BIN` 的绝对路径。若不设置 `CLI_INSTALL_DIR`，面板可检查但不会修改本机 CLI；启用托管更新请将其设为专用可写的绝对目录，并安装 npm。
+本机默认监听 `127.0.0.1:56439`。可指定 `CODEX_BIN` 的绝对路径。若不设置 `CLI_INSTALL_DIR`，面板可检查但不会修改本机 CLI；启用托管更新请将其设为专用可写的绝对目录，并安装 npm。
 
 ```sh
 go test -race ./...

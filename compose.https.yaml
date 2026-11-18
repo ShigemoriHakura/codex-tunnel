@@ -1,0 +1,20 @@
+# Enable with COMPOSE_FILE=compose.yaml:compose.https.yaml in .env (Linux).
+services:
+  gateway:
+    ports: !override
+      - "0.0.0.0:${PORT:-56439}:${PORT:-56439}"
+    environment:
+      TLS_CERT_FILE: /run/tls/server.crt
+      TLS_KEY_FILE: /run/tls/server.key
+      TLS_HEALTH_SERVER_NAME: ${TLS_HEALTH_SERVER_NAME:?Set the certificate DNS name or public IP}
+    volumes:
+      - type: bind
+        source: ./tls/server.crt
+        target: /run/tls/server.crt
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ./tls/server.key
+        target: /run/tls/server.key
+        read_only: true
+        bind: { create_host_path: false }

@@ -22,5 +22,5 @@ jobs:
           trap 'docker compose down -v' EXIT
           docker compose config -q
           docker compose up --build -d --wait
-          curl -fsS http://127.0.0.1:8080/healthz
-          curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:8080/admin/cli
+          curl -fsS http://127.0.0.1:56439/healthz
+          curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:56439/admin/cli

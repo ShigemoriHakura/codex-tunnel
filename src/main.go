@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -43,13 +44,22 @@ func env(k, v string) string {
 	return v
 }
 func main() {
+	listen, cert, key := env("LISTEN_ADDR", "127.0.0.1:56439"), os.Getenv("TLS_CERT_FILE"), os.Getenv("TLS_KEY_FILE")
+	host, port, e := net.SplitHostPort(listen)
+	if e != nil {
+		log.Fatal(e)
+	}
+	nport, e := strconv.Atoi(port)
+	if e != nil || nport < 49152 || nport > 65535 {
+		log.Fatal("use a high service port (49152–65535)")
+	}
+	if (cert == "") != (key == "") {
+		log.Fatal("both TLS_CERT_FILE and TLS_KEY_FILE are required for HTTPS")
+	}
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
-		c := http.Client{Timeout: 3 * time.Second}
-		r, e := c.Get("http://127.0.0.1:8080/healthz")
-		if e != nil || r.StatusCode != 200 {
-			os.Exit(1)
+		if e = healthcheck(host, port, cert, os.Getenv("TLS_HEALTH_SERVER_NAME")); e != nil {
+			log.Fatal(e)
 		}
-		r.Body.Close()
 		return
 	}
 	syscall.Umask(0077)
@@ -104,7 +114,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srv := http.Server{Addr: env("LISTEN_ADDR", "127.0.0.1:8080"), Handler: a.routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 11 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32768, BaseContext: func(_ net.Listener) context.Context { return ctx }}
+	srv := http.Server{Addr: listen, Handler: a.routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 11 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32768, BaseContext: func(_ net.Listener) context.Context { return ctx }}
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -114,7 +124,13 @@ func main() {
 		srv.Shutdown(c)
 	}()
 	log.Printf("Desk Tunnel listening on %s", srv.Addr)
-	if e = srv.ListenAndServe(); e != nil && !errors.Is(e, http.ErrServerClosed) {
+	if cert != "" {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		e = srv.ListenAndServeTLS(cert, key)
+	} else {
+		e = srv.ListenAndServe()
+	}
+	if e != nil && !errors.Is(e, http.ErrServerClosed) {
 		log.Fatal(e)
 	}
 	<-stopped

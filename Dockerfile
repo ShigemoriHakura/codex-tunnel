@@ -13,8 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && mkdir -p /srv/data /srv/codex /srv/cli /srv/work \
  && chown -R node:node /srv/data /srv/codex /srv/cli /srv/work
 COPY --from=build /out/desk-tunnel /usr/local/bin/desk-tunnel
-ENV DATA_DIR=/srv/data CODEX_HOME=/srv/codex CLI_INSTALL_DIR=/srv/cli LISTEN_ADDR=0.0.0.0:8080
+ENV DATA_DIR=/srv/data CODEX_HOME=/srv/codex CLI_INSTALL_DIR=/srv/cli LISTEN_ADDR=0.0.0.0:56439
 WORKDIR /srv/work
 USER node
-EXPOSE 8080
+EXPOSE 56439
 ENTRYPOINT ["desk-tunnel"]

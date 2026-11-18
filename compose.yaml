@@ -7,8 +7,9 @@ services:
     init: true
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${PORT:-8080}:8080"
+      - "127.0.0.1:${PORT:-56439}:${PORT:-56439}"
     environment:
+      LISTEN_ADDR: "0.0.0.0:${PORT:-56439}"
       ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env first}
       MAX_CONCURRENT: ${MAX_CONCURRENT:-4}
     volumes:
