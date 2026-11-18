@@ -351,3 +351,11 @@ progress {
 label:has(progress) {
   margin: 16px 0;
 }
+.language {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.language select {
+  padding: 0.25rem 0.5rem;
+}

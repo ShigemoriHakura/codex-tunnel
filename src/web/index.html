@@ -4,40 +4,56 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="theme-color" content="#112b28" />
-    <title>Desk Tunnel · 网关控制台</title>
+    <title data-i18n="document.title">Desk Tunnel · 网关控制台</title>
     <link rel="stylesheet" href="/style.css" />
-    <script src="/app.js" defer></script>
+    <script type="module" src="/app.js"></script>
   </head>
   <body>
     <div id="login" class="login">
       <form id="signin" class="login-card">
         <div class="brand"><b class="mark">↳</b> DESK TUNNEL</div>
-        <p class="eyebrow">GATEWAY CONSOLE</p>
-        <h1>网关控制台</h1>
-        <p>使用部署时配置的管理员令牌登录。</p>
+        <label class="language"
+          ><span data-i18n="shell.language">语言</span
+          ><select data-language></select
+        ></label>
+        <p class="eyebrow" data-i18n="shell.brandLabel">网关管理</p>
+        <h1 data-i18n="login.title">网关控制台</h1>
+        <p data-i18n="login.hint">使用部署时配置的管理员令牌登录。</p>
         <label
-          >管理员令牌<input
+          ><span data-i18n="login.token">管理员令牌</span
+          ><input
             id="token"
             type="password"
             autocomplete="current-password"
             required
-            autofocus /></label
-        ><button class="primary">连接网关 →</button>
+            autofocus
+        /></label>
+        <button class="primary" data-i18n="login.connect">连接网关 →</button>
         <p id="loginError" role="alert"></p>
       </form>
     </div>
     <div id="shell" hidden>
       <aside>
         <div class="brand"><b class="mark">↳</b> DESK TUNNEL</div>
-        <small>WORKSPACE / 网关管理</small>
+        <small data-i18n="shell.workspace">工作区 / 网关管理</small>
         <nav id="nav"></nav>
-        <button id="logout" class="ghost">退出管理面板</button>
+        <button id="logout" class="ghost" data-i18n="shell.logout">
+          退出管理面板
+        </button>
       </aside>
       <main>
         <header>
           <span class="eyebrow"
-            >CONTROL PLANE <i>/</i> <span id="section"></span></span
-          ><span class="badge">● 已连接</span>
+            ><span data-i18n="shell.control">控制面板</span> <i>/</i>
+            <span id="section"></span
+          ></span>
+          <div class="bar">
+            <label class="language"
+              ><span data-i18n="shell.language">语言</span
+              ><select data-language></select
+            ></label>
+            <span class="badge" data-i18n="shell.connected">● 已连接</span>
+          </div>
         </header>
         <h1 id="title"></h1>
         <p id="desc"></p>

@@ -1,42 +1,18 @@
-"use strict";
-const $ = (id) => document.getElementById(id),
-  pages = {
-    overview: [
-      "运行概览",
-      "OVERVIEW",
-      "查看此网关的推理请求和已报告的 Token 用量。",
-    ],
-    keys: [
-      "访问密钥",
-      "ACCESS KEYS",
-      "创建独立的客户端身份；撤销后无法发起新请求。",
-    ],
-    sessions: [
-      "会话管理",
-      "SESSIONS",
-      "查看会话归属、模型和活动记录，或移除会话绑定。",
-    ],
-    logs: [
-      "请求日志",
-      "REQUESTS",
-      "记录推理请求的元数据，不记录提示词或响应正文。",
-    ],
-    models: [
-      "模型与配额",
-      "UPSTREAM",
-      "查询当前 Codex 登录身份可见的模型和上游配额。",
-    ],
-    cli: [
-      "CLI 维护",
-      "RUNTIME",
-      "检查官方稳定版本；安装验证成功后，新请求才切换版本。",
-    ],
-    play: [
-      "接口调试",
-      "PLAYGROUND",
-      "使用客户端 API 密钥测试对话、续聊和生图。",
-    ],
-  };
+import {
+  msg,
+  text,
+  writeText,
+  initLanguage,
+  number,
+  dateTime,
+  percent,
+  hasMessage,
+  uiError,
+} from "./i18n.mjs";
+
+const $ = (id) => document.getElementById(id);
+const pages = ["overview", "keys", "sessions", "logs", "models", "cli", "play"];
+initLanguage();
 let admin = "",
   page = "overview",
   offset = 0,
@@ -44,12 +20,12 @@ let admin = "",
   epoch = 0;
 function el(tag, text, cls) {
   const n = document.createElement(tag);
-  if (text !== undefined) n.textContent = text;
+  if (text !== undefined) writeText(n, text);
   if (cls) n.className = cls;
   return n;
 }
 function notice(s) {
-  $("notice").textContent = s;
+  writeText($("notice"), s);
 }
 function button(s, fn, cls) {
   const b = el("button", s, cls);
@@ -60,7 +36,7 @@ function button(s, fn, cls) {
     try {
       await fn();
     } catch (e) {
-      if (at === epoch) notice(e.message);
+      if (at === epoch) notice(e.localized || e.message);
     } finally {
       b.disabled = false;
     }
@@ -68,7 +44,7 @@ function button(s, fn, cls) {
   return b;
 }
 async function req(path, { method = "GET", data, key = admin } = {}) {
-  const r = await fetch(path, {
+  return requestJSON(path, {
     method,
     headers: {
       Authorization: "Bearer " + key,
@@ -76,8 +52,27 @@ async function req(path, { method = "GET", data, key = admin } = {}) {
     },
     body: data ? JSON.stringify(data) : undefined,
   });
-  const j = await r.json();
-  if (!r.ok) throw Error(`${r.status} · ${j.error?.message || "请求失败"}`);
+}
+async function requestJSON(path, options) {
+  let r;
+  try {
+    r = await fetch(path, options);
+  } catch {
+    throw uiError(msg("error.network"));
+  }
+  let j;
+  try {
+    j = await r.json();
+  } catch {
+    throw uiError(msg("error.response"), r.status);
+  }
+  if (!r.ok) {
+    const key = `error.${j?.error?.code}`;
+    throw uiError(
+      hasMessage(key) ? msg(key) : j?.error?.message || msg("error.request"),
+      r.status,
+    );
+  }
   return j;
 }
 function field(label, type = "text", initial = "") {
@@ -98,7 +93,7 @@ function panel(root, title) {
 }
 function table(root, heads, items, cols) {
   if (!items.length) {
-    root.append(el("p", "暂无记录。"));
+    root.append(el("p", msg("common.empty")));
     return;
   }
   const t = el("table"),
@@ -112,27 +107,25 @@ function table(root, heads, items, cols) {
       const v = typeof c === "function" ? c(i) : i[c],
         td = r.insertCell();
       if (v instanceof Node) td.append(v);
-      else td.textContent = v ?? "—";
+      else writeText(td, v ?? "—");
     }
   }
   root.append(t);
 }
-const time = (s) => new Date(s * 1000).toLocaleString(),
-  num = (n) => Number(n).toLocaleString(),
-  short = (s) => (s ? s.slice(0, 13) + "…" : "—");
+const short = (s) => (s ? s.slice(0, 13) + "…" : "—");
 function pager(root, len) {
   const p = el("div", undefined, "toolbar");
   if (offset > 0)
     p.append(
-      button("← 上一页", () => {
+      button(msg("common.previous"), () => {
         offset -= 100;
         return render();
       }),
     );
-  p.append(el("small", `第 ${offset / 100 + 1} 页`));
+  p.append(el("small", msg("common.page", { page: number(offset / 100 + 1) })));
   if (len === 100)
     p.append(
-      button("下一页 →", () => {
+      button(msg("common.next"), () => {
         offset += 100;
         return render();
       }),
@@ -148,13 +141,13 @@ function goto(p) {
 async function render() {
   const current = ++epoch;
   notice("");
-  $("title").textContent = pages[page][0];
-  $("desc").textContent = pages[page][2];
-  $("section").textContent = pages[page][1];
+  writeText($("title"), msg(`nav.${page}`));
+  writeText($("desc"), msg(`desc.${page}`));
+  writeText($("section"), msg(`nav.${page}`));
   $("nav").replaceChildren(
-    ...Object.keys(pages).map((k) =>
+    ...pages.map((k) =>
       button(
-        pages[k][0],
+        msg(`nav.${k}`),
         () => {
           filter = "";
           return goto(k);
@@ -165,12 +158,12 @@ async function render() {
   );
   const root = el("div");
   $("content").replaceChildren(root);
-  const status = el("p", "正在读取…");
+  const status = el("p", msg("common.loading"));
   root.append(status);
   try {
     await views[page](root);
   } catch (e) {
-    if (current === epoch) notice(e.message);
+    if (current === epoch) notice(e.localized || e.message);
   } finally {
     status.remove();
   }
@@ -178,15 +171,25 @@ async function render() {
 function logTable(root, items) {
   table(
     root,
-    ["时间", "密钥 / 类型", "模型", "状态", "输入 / 输出", "耗时"],
+    [
+      msg("col.time"),
+      msg("col.keyKind"),
+      msg("col.model"),
+      msg("col.status"),
+      msg("col.usage"),
+      msg("col.latency"),
+    ],
     items,
     [
-      (i) => time(i.created),
+      (i) => dateTime(i.created),
       (i) => (i.key_name || short(i.owner)) + " / " + i.kind,
       "model",
       "status",
-      (i) => (i.metered ? `${i.input} / ${i.output}` : "未报告"),
-      (i) => i.latency_ms + " ms",
+      (i) =>
+        i.metered
+          ? () => `${number(i.input)()} / ${number(i.output)()}`
+          : msg("usage.unknown"),
+      (i) => () => number(i.latency_ms)() + " ms",
     ],
   );
 }
@@ -198,34 +201,37 @@ const views = {
     ]);
     const grid = el("div", undefined, "grid");
     for (const [k, label] of Object.entries({
-      requests: "推理请求",
-      input_tokens: "输入 Tokens",
-      output_tokens: "输出 Tokens",
-      images: "成功生图",
+      requests: msg("usage.requests"),
+      input_tokens: msg("usage.input"),
+      output_tokens: msg("usage.output"),
+      images: msg("usage.images"),
     })) {
       const box = el("div", undefined, "stat");
-      box.append(el("small", label), el("b", num(u[k])));
+      box.append(el("small", label), el("b", number(u[k])));
       grid.append(box);
     }
     root.append(
       grid,
       el(
         "p",
-        `失败 ${u.errors} 次 · ${u.unmetered_requests} 次上游未报告 Token。统计不是账单。`,
+        msg("usage.summary", {
+          errors: number(u.errors),
+          unmetered: number(u.unmetered_requests),
+        }),
       ),
     );
-    const [s, bar] = panel(root, "最近活动");
-    bar.append(button("查看全部 →", () => goto("logs")));
+    const [s, bar] = panel(root, msg("usage.recent"));
+    bar.append(button(msg("usage.all"), () => goto("logs")));
     logTable(s, l.data.slice(0, 8));
   },
   async keys(root) {
-    const [s] = panel(root, "签发密钥"),
-      [lab, name] = field("用途 / 名称"),
+    const [s] = panel(root, msg("keys.issue")),
+      [lab, name] = field(msg("keys.name")),
       line = el("div", undefined, "toolbar");
     line.append(
       lab,
       button(
-        "创建密钥",
+        msg("keys.create"),
         async () => {
           const j = await req("/admin/keys", {
             method: "POST",
@@ -234,7 +240,7 @@ const views = {
           await render();
           const out = el("section");
           out.append(
-            el("strong", "请立即复制，完整密钥仅显示一次。"),
+            el("strong", msg("keys.copy")),
             el("div", j.key, "secret"),
           );
           $("content").prepend(out);
@@ -244,23 +250,29 @@ const views = {
     );
     s.append(line);
     const l = await req("/admin/keys?offset=" + offset),
-      [list] = panel(root, "客户端密钥");
+      [list] = panel(root, msg("keys.list"));
     table(
       list,
-      ["名称", "标识（非密钥）", "创建时间", "状态", "操作"],
+      [
+        msg("col.name"),
+        msg("col.id"),
+        msg("col.created"),
+        msg("col.status"),
+        msg("col.actions"),
+      ],
       l.data,
       [
         "name",
         "id",
-        (i) => time(i.created),
-        (i) => (i.revoked ? "已撤销" : "有效"),
+        (i) => dateTime(i.created),
+        (i) => (i.revoked ? msg("keys.revoked") : msg("keys.active")),
         (i) =>
           i.revoked
             ? "—"
             : button(
-                "撤销",
+                msg("keys.revoke"),
                 async () => {
-                  if (confirm("撤销 " + i.name + " 的访问权？")) {
+                  if (confirm(text("keys.confirm", { name: i.name }))) {
                     await req("/admin/keys/" + i.id, { method: "DELETE" });
                     await render();
                   }
@@ -273,59 +285,81 @@ const views = {
   },
   async sessions(root) {
     const l = await req("/admin/sessions?offset=" + offset),
-      [s] = panel(root, "持久会话");
-    table(s, ["名称 / 归属", "会话 ID", "模型", "最近活动", "操作"], l.data, [
-      (i) => i.name + " / " + i.key_name,
-      "id",
-      (i) => i.model || "默认",
-      (i) => time(i.updated),
-      (i) => {
-        const n = el("div", undefined, "toolbar");
-        n.append(
-          button("历史", async () => {
-            const [box, bar] = panel(root, "会话内容 · " + i.name);
-            bar.append(button("关闭", () => box.remove()));
-            box.scrollIntoView();
-            const load = async (cursor = "") => {
-              const j = await req(
-                "/admin/sessions/" +
-                  i.id +
-                  "/history?cursor=" +
-                  encodeURIComponent(cursor),
+      [s] = panel(root, msg("sessions.list"));
+    table(
+      s,
+      [
+        msg("col.owner"),
+        msg("col.session"),
+        msg("col.model"),
+        msg("usage.recent"),
+        msg("col.actions"),
+      ],
+      l.data,
+      [
+        (i) => i.name + " / " + i.key_name,
+        "id",
+        (i) => i.model || msg("common.default"),
+        (i) => dateTime(i.updated),
+        (i) => {
+          const n = el("div", undefined, "toolbar");
+          n.append(
+            button(msg("sessions.history"), async () => {
+              const [box, bar] = panel(
+                root,
+                msg("sessions.content", { name: i.name }),
               );
-              if (!j.data.length) box.append(el("p", "尚无对话。"));
-              for (const t of j.data) {
-                for (const m of t.messages)
-                  box.append(el("small", m.role), el("pre", m.content));
-              }
-              if (j.next_cursor) {
-                const more = button("更早内容", async () => {
-                  await load(j.next_cursor);
-                  more.remove();
-                });
-                box.append(more);
-              }
-            };
-            await load();
-          }),
-          button("记录", () => {
-            filter = i.id;
-            return goto("logs");
-          }),
-          button(
-            "移除",
-            async () => {
-              if (confirm("移除绑定后客户端无法继续该会话。确认？")) {
-                await req("/admin/sessions/" + i.id, { method: "DELETE" });
-                await render();
-              }
-            },
-            "warn",
-          ),
-        );
-        return n;
-      },
-    ]);
+              bar.append(button(msg("common.close"), () => box.remove()));
+              box.scrollIntoView();
+              const load = async (cursor = "") => {
+                const j = await req(
+                  "/admin/sessions/" +
+                    i.id +
+                    "/history?cursor=" +
+                    encodeURIComponent(cursor),
+                );
+                if (!j.data.length) box.append(el("p", msg("sessions.empty")));
+                for (const t of j.data) {
+                  for (const m of t.messages)
+                    box.append(
+                      el(
+                        "small",
+                        hasMessage(`role.${m.role}`)
+                          ? msg(`role.${m.role}`)
+                          : m.role,
+                      ),
+                      el("pre", m.content),
+                    );
+                }
+                if (j.next_cursor) {
+                  const more = button(msg("sessions.older"), async () => {
+                    await load(j.next_cursor);
+                    more.remove();
+                  });
+                  box.append(more);
+                }
+              };
+              await load();
+            }),
+            button(msg("sessions.logs"), () => {
+              filter = i.id;
+              return goto("logs");
+            }),
+            button(
+              msg("sessions.remove"),
+              async () => {
+                if (confirm(text("sessions.confirm"))) {
+                  await req("/admin/sessions/" + i.id, { method: "DELETE" });
+                  await render();
+                }
+              },
+              "warn",
+            ),
+          );
+          return n;
+        },
+      ],
+    );
     pager(s, l.data.length);
   },
   async logs(root) {
@@ -337,10 +371,10 @@ const views = {
       ),
       [s, b] = panel(
         root,
-        filter ? "会话活动 · " + short(filter) : "全部推理请求",
+        filter ? msg("logs.filtered", { id: short(filter) }) : msg("logs.all"),
       );
     b.append(
-      button(filter ? "清除筛选" : "刷新", () => {
+      button(filter ? msg("logs.clear") : msg("common.refresh"), () => {
         filter = "";
         return goto("logs");
       }),
@@ -349,16 +383,16 @@ const views = {
     pager(s, l.data.length);
   },
   async models(root) {
-    const [s, b] = panel(root, "可用模型");
-    b.append(button("重新查询", render));
-    const [q, qb] = panel(root, "账户限额"),
+    const [s, b] = panel(root, msg("models.available"));
+    b.append(button(msg("models.refresh"), render));
+    const [q, qb] = panel(root, msg("quota.title")),
       out = el("pre"),
       windows = el("div"),
       raw = el("details");
     raw.hidden = true;
-    raw.append(el("summary", "查看上游原始数据"), out);
+    raw.append(el("summary", msg("quota.raw")), out);
     qb.append(
-      button("查询上游配额", async () => {
+      button(msg("quota.query"), async () => {
         const data = await req("/admin/quota");
         out.textContent = JSON.stringify(data, null, 2);
         raw.hidden = false;
@@ -375,48 +409,65 @@ const views = {
             if (!slot) continue;
             const label = el(
               "label",
-              `${bucket.limitName || name} · ${slot.windowDurationMins ? slot.windowDurationMins + " 分钟" : "窗口 " + (index + 1)} · 已用 ${slot.usedPercent}%`,
+              msg("quota.used", {
+                bucket: bucket.limitName || name,
+                window: slot.windowDurationMins
+                  ? msg("quota.minutes", { n: number(slot.windowDurationMins) })
+                  : msg("quota.window", { n: number(index + 1) }),
+                percent: percent(slot.usedPercent),
+              }),
             );
             const meter = el("progress");
             meter.max = 100;
             meter.value = slot.usedPercent;
             label.append(meter);
             if (slot.resetsAt)
-              label.append(el("small", "重置：" + time(slot.resetsAt)));
+              label.append(
+                el(
+                  "small",
+                  msg("quota.reset", { time: dateTime(slot.resetsAt) }),
+                ),
+              );
             windows.append(label);
           }
         }
       }),
     );
-    q.append(el("p", "不同登录方式可能不提供限额数据。"), windows, raw);
+    q.append(el("p", msg("quota.hint")), windows, raw);
     const m = await req("/admin/models");
-    table(s, ["模型 ID", "显示名称", "默认"], m.data, [
-      "id",
-      "name",
-      (i) => (i.is_default ? "是" : "—"),
-    ]);
+    table(
+      s,
+      [msg("col.modelId"), msg("col.displayName"), msg("common.default")],
+      m.data,
+      ["id", "name", (i) => (i.is_default ? msg("common.yes") : "—")],
+    );
   },
   async cli(root) {
-    const [s, b] = panel(root, "运行时版本");
+    const [s, b] = panel(root, msg("cli.title"));
     let installed = await req("/admin/cli");
     s.append(
       el(
         "p",
-        `当前版本：${installed.installed} · ${installed.managed ? "托管安装" : "外部管理，仅可检查"}`,
+        msg("cli.current", {
+          version: installed.installed,
+          mode: msg(installed.managed ? "cli.managed" : "cli.external"),
+        }),
       ),
     );
     b.append(
-      button("检查更新", async () => {
+      button(msg("cli.check"), async () => {
         const j = await req("/admin/cli?check=1");
-        if (!j.latest) throw Error(j.check_error);
-        details.replaceChildren(el("p", "npm 稳定版本：" + j.latest));
+        if (!j.latest) throw uiError(msg("error.registry_error"));
+        details.replaceChildren(
+          el("p", msg("cli.latest", { version: j.latest })),
+        );
         if (j.managed && j.latest !== j.installed)
           details.append(
             button(
-              "安装 " + j.latest,
+              msg("cli.install", { version: j.latest }),
               async () => {
-                if (confirm("安装该官方版本并切换新请求？")) {
-                  notice("正在安装和验证，请稍候…");
+                if (confirm(text("cli.confirm"))) {
+                  notice(msg("cli.installing"));
                   await req("/admin/cli/update", {
                     method: "POST",
                     data: { version: j.latest },
@@ -433,8 +484,8 @@ const views = {
     s.append(details);
     if (installed.managed)
       s.append(
-        button("恢复镜像内置版本", async () => {
-          if (confirm("新请求将使用内置版本。继续？")) {
+        button(msg("cli.restore"), async () => {
+          if (confirm(text("cli.confirmRestore"))) {
             await req("/admin/cli/update", {
               method: "POST",
               data: { reset: true },
@@ -445,19 +496,20 @@ const views = {
       );
   },
   async play(root) {
-    const [s] = panel(root, "发送请求"),
-      [lk, key] = field("客户端 API 密钥", "password"),
-      [lm, model] = field("模型（留空使用默认）"),
-      [ls, sid] = field("会话 ID（可选）"),
-      [lp, prompt] = field("提示词", "textarea");
+    const [s] = panel(root, msg("play.send")),
+      [lk, key] = field(msg("play.key"), "password"),
+      [lm, model] = field(msg("play.model")),
+      [ls, sid] = field(msg("play.session")),
+      [lp, prompt] = field(msg("play.prompt"), "textarea");
     key.autocomplete = "off";
     const tools = el("div", undefined, "toolbar"),
       out = el("pre"),
       image = el("img");
-    image.alt = "生成结果";
+    image.dataset.i18nAlt = "play.result";
+    image.alt = text("play.result");
     image.hidden = true;
     const call = (path, data, headers = {}) =>
-      fetch(path, {
+      requestJSON(path, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -465,24 +517,20 @@ const views = {
           ...headers,
         },
         body: JSON.stringify(data),
-      }).then(async (r) => {
-        const j = await r.json();
-        if (!r.ok) throw Error(j.error?.message || "失败");
-        return j;
       });
     tools.append(
-      button("新建会话", async () => {
+      button(msg("play.new"), async () => {
         const j = await call("/v1/sessions", {
-          name: "面板调试",
+          name: text("play.name"),
           model: model.value,
         });
         sid.value = j.id;
       }),
       button(
-        "对话",
+        msg("play.chat"),
         async () => {
           image.hidden = true;
-          out.textContent = "正在生成…";
+          writeText(out, msg("play.generating"));
           try {
             const j = await call(
               "/v1/chat/completions",
@@ -492,17 +540,17 @@ const views = {
               },
               sid.value ? { "X-Session-ID": sid.value } : {},
             );
-            out.textContent = j.choices[0].message.content;
+            writeText(out, j.choices[0].message.content);
           } catch (e) {
-            out.textContent = "";
+            writeText(out, "");
             throw e;
           }
         },
         "primary",
       ),
-      button("生成图片", async () => {
+      button(msg("play.image"), async () => {
         image.hidden = true;
-        out.textContent = "正在生图…";
+        writeText(out, msg("play.drawing"));
         try {
           const j = await call("/v1/images/generations", {
             model: model.value,
@@ -511,7 +559,7 @@ const views = {
           image.src = "data:image/png;base64," + j.data[0].b64_json;
           image.hidden = false;
         } finally {
-          out.textContent = "";
+          writeText(out, "");
         }
       }),
     );
@@ -524,13 +572,13 @@ $("signin").onsubmit = async (e) => {
   try {
     await req("/admin/usage");
     $("token").value = "";
-    $("loginError").textContent = "";
+    writeText($("loginError"), "");
     $("login").hidden = true;
     $("shell").hidden = false;
     await goto("overview");
   } catch (err) {
     admin = "";
-    $("loginError").textContent = err.message;
+    writeText($("loginError"), err.localized || err.message);
   }
 };
 $("logout").onclick = () => location.reload();
