@@ -31,6 +31,7 @@ type app struct {
 	db               *sql.DB
 	admin, cliHome   string
 	base             runner
+	servers          *appServers
 	imageTransport   http.RoundTripper
 	slots            chan struct{}
 	admitted         chan struct{}
@@ -123,6 +124,13 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	a.servers = newAppServers(ctx)
+	defer a.servers.close()
+	warm, e := a.servers.acquire(ctx, active, false)
+	if e != nil {
+		log.Fatalf("initialize Codex app-server: %v", e)
+	}
+	a.servers.release(warm, false)
 	srv := http.Server{Addr: listen, Handler: a.routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 11 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32768, BaseContext: func(_ net.Listener) context.Context { return ctx }}
 	stopped := make(chan struct{})
 	go func() {
@@ -446,7 +454,7 @@ func (a *app) models(w http.ResponseWriter, r *http.Request, _ string) {
 		internal(w, e)
 		return
 	}
-	list, e := run.models(ctx)
+	list, e := run.models(ctx, a.servers)
 	if e != nil {
 		upstream(w, ctx, e)
 		return
@@ -484,14 +492,14 @@ func (a *app) accountRead(w http.ResponseWriter, r *http.Request, _ string) {
 		internal(w, e)
 		return
 	}
-	p, e := run.open(ctx, false)
+	p, e := a.servers.acquire(ctx, run, false)
 	if e != nil {
 		upstream(w, ctx, e)
 		return
 	}
-	defer p.close()
+	defer a.servers.release(p, false)
 	if r.URL.Path == "/admin/account" {
-		b, err := p.call("account/read", M{"refreshToken": false}, nil)
+		b, err := p.call(ctx, "account/read", M{"refreshToken": false})
 		if err != nil {
 			upstream(w, ctx, err)
 			return
@@ -512,7 +520,7 @@ func (a *app) accountRead(w http.ResponseWriter, r *http.Request, _ string) {
 		jsonOut(w, 200, status)
 		return
 	}
-	b, e := p.call("account/rateLimits/read", M{"excludeResetCreditDetails": false}, nil)
+	b, e := p.call(ctx, "account/rateLimits/read", M{"excludeResetCreditDetails": false})
 	if e != nil {
 		upstream(w, ctx, e)
 		return

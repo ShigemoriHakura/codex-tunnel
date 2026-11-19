@@ -194,11 +194,20 @@ func (r runner) checkProtocol(ctx context.Context) error {
 	if e = r.command(ctx, r.bin, "app-server", "generate-json-schema", "--experimental", "--out", tmp).Run(); e != nil {
 		return e
 	}
-	for _, name := range []string{"TurnStartParams", "ThreadStartParams"} {
+	required := map[string][]string{
+		"TurnStartParams": {"environments"}, "ThreadStartParams": {"environments"},
+		"TurnInterruptParams": {"threadId", "turnId"}, "ThreadUnsubscribeParams": {"threadId"},
+	}
+	for name, fields := range required {
 		b, e := os.ReadFile(filepath.Join(tmp, "v2", name+".json"))
 		var schema struct{ Properties map[string]json.RawMessage }
-		if e != nil || json.Unmarshal(b, &schema) != nil || schema.Properties["environments"] == nil {
-			return errors.New("missing environment isolation support")
+		if e != nil || json.Unmarshal(b, &schema) != nil {
+			return fmt.Errorf("missing Codex protocol schema %s", name)
+		}
+		for _, field := range fields {
+			if schema.Properties[field] == nil {
+				return fmt.Errorf("missing Codex protocol field %s.%s", name, field)
+			}
 		}
 	}
 

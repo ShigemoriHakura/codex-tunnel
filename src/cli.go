@@ -95,7 +95,7 @@ func (r runner) open(ctx context.Context, image bool) (*rpc, error) {
 }
 func (p *rpc) close()           { p.cancel(); p.in.Close(); p.cmd.Wait() }
 func (p *rpc) send(v any) error { return json.NewEncoder(p.in).Encode(v) }
-func (p *rpc) next() (packet, error) {
+func (p *rpc) read() (packet, error) {
 	var v packet
 	for p.scan.Scan() {
 		if len(p.scan.Bytes()) == 0 {
@@ -104,19 +104,26 @@ func (p *rpc) next() (packet, error) {
 		if e := json.Unmarshal(p.scan.Bytes(), &v); e != nil {
 			return v, e
 		}
-		if v.Method != "" && len(v.ID) > 0 {
-			if e := p.send(M{"id": v.ID, "error": M{"code": -32601, "message": "Client actions are disabled"}}); e != nil {
-				return v, e
-			}
-			v = packet{}
-			continue
-		}
 		return v, nil
 	}
 	if e := p.scan.Err(); e != nil {
 		return v, e
 	}
 	return v, io.ErrUnexpectedEOF
+}
+func (p *rpc) next() (packet, error) {
+	for {
+		v, err := p.read()
+		if err != nil || v.Method == "" || len(v.ID) == 0 {
+			return v, err
+		}
+		if err := p.send(disabledAction(v)); err != nil {
+			return v, err
+		}
+	}
+}
+func disabledAction(v packet) M {
+	return M{"id": v.ID, "error": M{"code": -32601, "message": "Client actions are disabled"}}
 }
 func (p *rpc) call(method string, params any, event func(packet) error) (reply json.RawMessage, err error) {
 	if t := tracing(p.ctx); t != nil && t.kind == "" && method != "initialize" {
@@ -148,12 +155,12 @@ func (p *rpc) call(method string, params any, event func(packet) error) (reply j
 		}
 	}
 }
-func (r runner) models(ctx context.Context) ([]M, error) {
-	p, e := r.open(ctx, false)
+func (r runner) models(ctx context.Context, servers *appServers) ([]M, error) {
+	p, e := servers.acquire(ctx, r, false)
 	if e != nil {
 		return nil, e
 	}
-	defer p.close()
+	defer servers.release(p, false)
 	out := []M{}
 	var cursor string
 	for i := 0; i < 64; i++ {
@@ -161,7 +168,7 @@ func (r runner) models(ctx context.Context) ([]M, error) {
 		if cursor != "" {
 			args["cursor"] = cursor
 		}
-		b, e := p.call("model/list", args, nil)
+		b, e := p.call(ctx, "model/list", args)
 		if e != nil {
 			return nil, e
 		}
@@ -214,12 +221,13 @@ type turn struct {
 	delta          func(string) error
 }
 
-func (r runner) run(ctx context.Context, t turn) (res result, err error) {
-	p, e := r.open(ctx, t.image)
+func (r runner) run(ctx context.Context, servers *appServers, t turn) (res result, err error) {
+	p, e := servers.acquire(ctx, r, t.image)
 	if e != nil {
 		return res, e
 	}
-	defer p.close()
+	retire := false
+	defer func() { servers.release(p, retire || errors.Is(err, errUnconfirmedRPC)) }()
 	args := M{"cwd": r.work, "sandbox": "read-only", "approvalPolicy": "never", "developerInstructions": "Answer the user's request directly. You have no local execution environment. Do not use filesystem, command, or connector tools."}
 	method := "thread/start"
 	if t.image {
@@ -236,7 +244,7 @@ func (r runner) run(ctx context.Context, t turn) (res result, err error) {
 		args["ephemeral"] = !t.persist
 		args["environments"] = []any{}
 	}
-	b, e := p.call(method, args, nil)
+	b, e := p.call(ctx, method, args)
 	if e != nil {
 		return res, e
 	}
@@ -245,22 +253,31 @@ func (r runner) run(ctx context.Context, t turn) (res result, err error) {
 		Model  string
 	}
 	if e = json.Unmarshal(b, &start); e != nil || start.Thread.ID == "" {
-		return res, errors.New("invalid thread response")
+		return res, errUnconfirmedRPC
 	}
 	thread := start.Thread.ID
+	inbox, e := p.subscribe(thread)
+	if e != nil {
+		return res, e
+	}
+	var turnID string
+	done := false
+	defer func() {
+		if !p.finishThread(thread, turnID, done, inbox) {
+			retire = true
+		}
+	}()
+	if e = ctx.Err(); e != nil {
+		return res, e
+	}
 	res.model = start.Model
 	if t.onThread != nil {
 		if e = t.onThread(thread, start.Model); e != nil {
 			return res, e
 		}
 	}
-	var turnID string
-	done := false
 	commentary := map[string]bool{}
 	event := func(v packet) error {
-		if v.Method != "item/started" && v.Method != "item/completed" && v.Method != "item/agentMessage/delta" && v.Method != "thread/tokenUsage/updated" && v.Method != "turn/completed" {
-			return nil
-		}
 		var n struct {
 			ThreadID, TurnID, ItemID, Delta string
 			Item                            struct{ ID, Type, Text, Phase, Result, SavedPath, Status string }
@@ -270,7 +287,7 @@ func (r runner) run(ctx context.Context, t turn) (res result, err error) {
 		if e := json.Unmarshal(v.Params, &n); e != nil {
 			return e
 		}
-		if n.ThreadID != thread || (turnID != "" && n.TurnID != "" && n.TurnID != turnID) {
+		if n.ThreadID != thread || (n.TurnID != "" && n.TurnID != turnID) {
 			return nil
 		}
 		switch v.Method {
@@ -301,7 +318,7 @@ func (r runner) run(ctx context.Context, t turn) (res result, err error) {
 				}
 			}
 		case "turn/completed":
-			if turnID != "" && n.Turn.ID != turnID {
+			if n.Turn.ID != turnID {
 				return nil
 			}
 			done = true
@@ -311,17 +328,17 @@ func (r runner) run(ctx context.Context, t turn) (res result, err error) {
 		}
 		return nil
 	}
-	b, e = p.call("turn/start", M{"threadId": thread, "environments": []any{}, "input": t.input}, event)
+	b, e = p.call(ctx, "turn/start", M{"threadId": thread, "environments": []any{}, "input": t.input})
 	if e != nil {
 		return res, e
 	}
 	var started struct{ Turn struct{ ID string } }
-	if e = json.Unmarshal(b, &started); e != nil {
-		return res, e
+	if e = json.Unmarshal(b, &started); e != nil || started.Turn.ID == "" {
+		return res, errUnconfirmedRPC
 	}
 	turnID = started.Turn.ID
 	for !done {
-		v, e := p.next()
+		v, e := inbox.next(ctx, p.ctx)
 		if e != nil {
 			return res, e
 		}

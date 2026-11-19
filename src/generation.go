@@ -153,11 +153,6 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		trace.model = t.model
 		trace.stream = &stream
 	}
-	run, e := a.current()
-	if e != nil {
-		internal(w, e)
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 	reply.jsonBody = !stream
@@ -219,6 +214,11 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	}
 	releaseWorker := sync.OnceFunc(a.release)
 	defer releaseWorker()
+	run, e := a.current()
+	if e != nil {
+		reject(500, "storage_error", "Could not load the CLI configuration")
+		return
+	}
 	if sid != "" {
 		// The preceding turn may have created the thread or changed its cumulative usage.
 		if refreshSession && !readSession() {
@@ -270,7 +270,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	if direct != nil {
 		res, runErr = a.generateNamedImage(ctx, run, *direct, func(e imageEvent) error { return reply.write(imagePartial, e) })
 	} else {
-		res, runErr = run.run(ctx, t)
+		res, runErr = run.run(ctx, a.servers, t)
 		if runErr == nil && image {
 			res.image, runErr = output.encode(res.image)
 		}

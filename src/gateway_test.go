@@ -38,6 +38,8 @@ func testApp(t *testing.T, dir string) *app {
 		}
 	}
 	a := &app{db: db, admin: digest(testAdmin), base: runner{os.Getenv("TEST_CODEX_BIN"), home, work}}
+	a.servers = newAppServers(context.Background())
+	t.Cleanup(a.servers.close)
 	a.initWorkers(2)
 	return a
 }
@@ -71,6 +73,7 @@ func TestAccessAndPersistence(t *testing.T) {
 	hit(t, a, "GET", "/admin/keys", key, "", "", 401)
 	hit(t, a, "POST", "/v1/sessions", testAdmin, `{}`, "", 401)
 	sid := prop(hit(t, a, "POST", "/v1/sessions", key, `{"name":"persist"}`, "", 201), "id")
+	a.servers.close()
 	a.db.Close()
 	a = testApp(t, d)
 	if !strings.Contains(hit(t, a, "GET", "/v1/sessions", key, "", "", 200), sid) {
@@ -349,23 +352,7 @@ func TestCLIIntegration(t *testing.T) {
 		event("response.completed", M{"response": M{"id": "resp_1", "status": "completed", "usage": M{"input_tokens": 12, "output_tokens": 3, "total_tokens": 15, "input_tokens_details": M{"cached_tokens": 4}, "output_tokens_details": M{"reasoning_tokens": 2}}}})
 	}))
 	defer mock.Close()
-	config := fmt.Sprintf(`model="gpt-5.4"
-chatgpt_base_url=%q
-model_provider="mock"
-[features]
-enable_request_compression=false
-[model_providers.mock]
-name="OpenAI"
-requires_openai_auth=true
-supports_websockets=false
-base_url=%q
-wire_api="responses"
-request_max_retries=0
-stream_max_retries=0
-`, mock.URL, mock.URL+"/v1")
-	if e := os.WriteFile(filepath.Join(a.base.home, "config.toml"), []byte(config), 0600); e != nil {
-		t.Fatal(e)
-	}
+	writeMockProviderConfig(t, a.base.home, mock.URL)
 	if out := hit(t, a, "GET", "/admin/account", testAdmin, "", "", 200); !strings.Contains(out, `"account":null`) {
 		t.Fatal(out)
 	}
@@ -380,6 +367,7 @@ stream_max_retries=0
 	if !strings.Contains(out, `"total_tokens":15`) {
 		t.Fatal(out)
 	}
+	a.servers.close()
 	a.db.Close()
 	a = testApp(t, d)
 	hit(t, a, "PATCH", "/admin/diagnostics/settings", testAdmin, `{"capture_body":true}`, "", 200)
@@ -400,7 +388,7 @@ stream_max_retries=0
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if _, e := a.base.models(ctx); e != nil {
+	if _, e := a.base.models(ctx, a.servers); e != nil {
 		t.Fatal(e)
 	}
 	// The pinned CLI offers the image tool only for a Codex-backend login. This
@@ -602,6 +590,27 @@ stream_max_retries=0
 		t.Fatal("invalid JSON provider fallback")
 	}
 
+}
+
+func writeMockProviderConfig(t *testing.T, home, baseURL string) {
+	t.Helper()
+	config := fmt.Sprintf(`model="gpt-5.4"
+chatgpt_base_url=%q
+model_provider="mock"
+[features]
+enable_request_compression=false
+[model_providers.mock]
+name="OpenAI"
+requires_openai_auth=true
+supports_websockets=false
+base_url=%q
+wire_api="responses"
+request_max_retries=0
+stream_max_retries=0
+`, baseURL, baseURL+"/v1")
+	if e := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0600); e != nil {
+		t.Fatal(e)
+	}
 }
 
 type testTransport func(*http.Request) (*http.Response, error)
