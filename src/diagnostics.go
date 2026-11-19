@@ -98,7 +98,7 @@ func (w *observedWriter) Write(b []byte) (int, error) {
 		w.WriteHeader(200)
 	}
 	t := w.trace
-	if t.capture && t.reqBody != "" && t.kind == "chat" && len(t.wireBody) < 8193 {
+	if t.capture && !strings.HasPrefix(t.id, "resp_") && t.reqBody != "" && t.kind == "chat" && len(t.wireBody) < 8193 {
 		t.wireBody = append(t.wireBody, b[:min(len(b), 8193-len(t.wireBody))]...)
 	}
 	return w.ResponseWriter.Write(b)
@@ -114,7 +114,7 @@ func (a *app) observe(next http.Handler) http.Handler {
 		t := &requestTrace{id: id("req_"), start: time.Now(), status: 200}
 		w.Header().Set("X-Request-ID", t.id)
 		switch path {
-		case "/v1/chat/completions":
+		case "/v1/chat/completions", "/v1/responses":
 			t.kind = "chat"
 		case "/v1/images/generations":
 			t.kind = "image"
@@ -377,6 +377,10 @@ func errorStatus(ctx context.Context, err error) int {
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 		return 504
+	}
+	var re *responsesError
+	if errors.As(err, &re) {
+		return re.status
 	}
 	var provider *imageProviderError
 	if errors.As(err, &provider) {

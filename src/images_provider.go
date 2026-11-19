@@ -48,37 +48,41 @@ type imageWorkspace struct {
 	BackendOrigin, ChatGPTAccountID, AccountRoutingOverride string
 }
 
-func (ws imageWorkspace) endpoint() (string, error) {
+func (ws imageWorkspace) endpointFor(path string) (string, error) {
 	u, err := url.Parse(ws.BackendOrigin)
 	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || (u.Hostname() != "chatgpt.com" && !strings.HasSuffix(u.Hostname(), ".chatgpt.com")) || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || ws.ChatGPTAccountID == "" {
-		return "", errors.New("unrecognized Codex Images workspace origin")
+		return "", errors.New("unrecognized Codex workspace origin")
 	}
 	switch ws.AccountRoutingOverride {
 	case "NO_CONSTRAINT", "us", "us_cr":
 	default:
-		return "", errors.New("unsupported Codex Images workspace routing")
+		return "", errors.New("unsupported Codex workspace routing")
 	}
-	u.Path = imagesPath
+	u.Path = path
 	return u.String(), nil
 }
 
 // CLI account discovery owns refresh and workspace selection. Read only the active
 // access token, and require its account to match that discovery before sending it.
 func (r runner) imageWorkspace(p *rpc, refresh bool) (imageWorkspace, string, error) {
-	var account struct {
-		Account          struct{ Type string }
-		WorkspaceRouting imageWorkspace
-	}
 	raw, err := p.call("account/read", M{"refreshToken": refresh}, nil)
 	if err != nil {
 		return imageWorkspace{}, "", err
 	}
-	if err = json.Unmarshal(raw, &account); err != nil {
+	return r.workspaceCredential(raw)
+}
+
+func (r runner) workspaceCredential(raw json.RawMessage) (imageWorkspace, string, error) {
+	var account struct {
+		Account          struct{ Type string }
+		WorkspaceRouting imageWorkspace
+	}
+	if err := json.Unmarshal(raw, &account); err != nil {
 		return imageWorkspace{}, "", err
 	}
 	ws := account.WorkspaceRouting
 	if account.Account.Type != "chatgpt" || ws.ChatGPTAccountID == "" {
-		return ws, "", errors.New("named image models require a signed-in Codex ChatGPT workspace")
+		return ws, "", errors.New("a signed-in Codex ChatGPT workspace is required")
 	}
 	f, err := os.Open(filepath.Join(r.home, "auth.json"))
 	if err != nil {
@@ -93,7 +97,7 @@ func (r runner) imageWorkspace(p *rpc, refresh bool) (imageWorkspace, string, er
 		}
 	}
 	if err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&auth); err != nil || auth.Mode != "chatgpt" || auth.Tokens.Access == "" || auth.Tokens.Account != ws.ChatGPTAccountID {
-		return ws, "", errors.New("Codex credential does not match the selected image workspace")
+		return ws, "", errors.New("Codex credential does not match the selected workspace")
 	}
 	return ws, auth.Tokens.Access, nil
 }
@@ -107,7 +111,7 @@ func (a *app) generateNamedImage(ctx context.Context, r runner, b imageRequest, 
 	}
 	defer p.close()
 	params := b.providerRequest()
-	client := http.Client{Transport: a.imageTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := http.Client{Transport: a.workspaceTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	var originalAccount string
 	turnID := id("")
 	turnID = fmt.Sprintf("%s-%s-4%s-8%s-%s", turnID[:8], turnID[8:12], turnID[13:16], turnID[17:20], turnID[20:32])
@@ -122,7 +126,7 @@ func (a *app) generateNamedImage(ctx context.Context, r runner, b imageRequest, 
 			return result{}, errors.New("Codex account changed while refreshing image credentials")
 		}
 		originalAccount = ws.ChatGPTAccountID
-		endpoint, err := ws.endpoint()
+		endpoint, err := ws.endpointFor(imagesPath)
 		if err != nil {
 			return result{}, err
 		}

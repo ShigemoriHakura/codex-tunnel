@@ -38,6 +38,8 @@ func openDB(dir string) (*sql.DB, error) {
  CREATE TABLE IF NOT EXISTS key_bindings(key_id TEXT PRIMARY KEY REFERENCES keys(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT);
  CREATE INDEX IF NOT EXISTS key_bindings_session ON key_bindings(session);
  CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner,updated DESC);
+ CREATE TABLE IF NOT EXISTS response_turns(id TEXT PRIMARY KEY,owner TEXT NOT NULL,session TEXT REFERENCES sessions(id) ON DELETE CASCADE,parent TEXT NOT NULL,stored INTEGER NOT NULL,input BLOB NOT NULL,output BLOB NOT NULL,status TEXT NOT NULL,created INTEGER NOT NULL);
+ CREATE INDEX IF NOT EXISTS response_session ON response_turns(session,created);
  CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,owner TEXT NOT NULL,session TEXT NOT NULL,kind TEXT NOT NULL,model TEXT NOT NULL,status INTEGER NOT NULL,input INTEGER NOT NULL,output INTEGER NOT NULL,metered INTEGER NOT NULL,latency_ms INTEGER NOT NULL,created INTEGER NOT NULL);
  CREATE INDEX IF NOT EXISTS requests_owner ON requests(owner,created DESC);
  CREATE INDEX IF NOT EXISTS requests_created ON requests(created DESC);

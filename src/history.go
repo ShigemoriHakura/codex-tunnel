@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Fetch on demand from the CLI, never duplicate conversation bodies in the gateway database.
+// The native history prefix remains in the CLI after a session adopts Responses.
 func (a *app) history(w http.ResponseWriter, r *http.Request, owner string) {
 	var thread string
 	sid := r.PathValue("id")
@@ -26,6 +26,9 @@ func (a *app) history(w http.ResponseWriter, r *http.Request, owner string) {
 	}
 	if e != nil {
 		internal(w, e)
+		return
+	}
+	if a.responseHistoryPage(w, r, sid, thread) {
 		return
 	}
 	if thread == "" {

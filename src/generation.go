@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -44,6 +45,9 @@ type imageRequest struct {
 func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	start := time.Now()
 	image := r.URL.Path == "/v1/images/generations"
+	responses := r.URL.Path == "/v1/responses"
+	var native *responsesRequest
+	var chatMessages []chatMessage
 	sid := r.Header.Get("X-Session-ID")
 	binding := boundSession(r)
 	if !image && binding != "" {
@@ -58,10 +62,13 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	var output imageOutput
 	var direct *imageRequest
 	var imageParams imageRequest
-	reply := generationResponse{w: w, image: image}
+	reply := generationResponse{w: w, image: image, responses: responses}
 	stream, includeUsage := false, false
 	kind := "chat"
 	rid := id("chatcmpl-")
+	if responses {
+		rid = id("resp_")
+	}
 	if image {
 		rid = id("img_")
 	}
@@ -114,6 +121,21 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		t.model = b.Model
 		t.input = []turnInput{{Type: "text", Text: b.Prompt}}
 
+	} else if responses {
+		var fields responseFields
+		if !boundedBody(w, r, &fields, chatBodyLimit) {
+			return
+		}
+		var err error
+		native, err = parseResponses(fields)
+		if err != nil {
+			fail(w, 400, "invalid_request", err.Error())
+			return
+		}
+		t.model, stream = native.model, native.stream
+		if trace != nil && trace.capture {
+			trace.reqBody = preview(M{"model": t.model, "input_items": len(native.input), "stream": stream})
+		}
 	} else {
 		var b chatRequest
 		if !boundedBody(w, r, &b, chatBodyLimit) {
@@ -135,6 +157,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			return
 		}
 		t.model = b.Model
+		chatMessages = b.Messages
 		stream = b.Stream
 		includeUsage = b.StreamOptions != nil && b.StreamOptions.IncludeUsage
 		if trace != nil && trace.capture {
@@ -239,13 +262,52 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			return e
 		}
 	}
+	var head string
+	if sid != "" {
+		head, e = a.responseHead(ctx, sid)
+		if e != nil {
+			reject(500, "storage_error", "Could not load session history")
+			return
+		}
+		if head != "" && !responses {
+			if boundSession(r) != "" && len(chatMessages) > 1 {
+				chatMessages = chatMessages[len(chatMessages)-1:]
+			}
+			native = chatResponseRequest(chatMessages, t.model)
+		}
+	}
+	var contextItems responseItems
+	if native != nil {
+		contextItems, e = a.responseContext(ctx, native, owner, sid, head)
+		if e == nil && t.thread != "" {
+			var prefix responseItems
+			prefix, e = a.nativeResponseHistory(ctx, run, t.thread)
+			if e == nil {
+				if head == "" && native.previous == "" {
+					native.input = unreplayedInput(prefix, contextItems)
+					contextItems = native.input
+				}
+				contextItems = append(prefix, contextItems...)
+			}
+		}
+		if e != nil {
+			var bad *responsesError
+			if errors.As(e, &bad) {
+				reject(bad.status, bad.code, bad.message)
+			} else {
+				log.Printf("load Responses history: %v", e)
+				reject(errorStatus(ctx, e), "history_error", "Could not load Responses history")
+			}
+			return
+		}
+	}
 	opened := false
 	model := t.model
 	chunk := func(delta M, finish any) M {
 		return M{"id": rid, "object": "chat.completion.chunk", "created": start.Unix(), "model": model, "choices": []M{{"index": 0, "delta": delta, "finish_reason": finish}}}
 	}
 	send := func(v any) error { return reply.write("", v) }
-	if stream && !image {
+	if stream && !image && !responses {
 		bind := t.onThread
 		t.onThread = func(thread, m string) error {
 			model = m
@@ -267,7 +329,15 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	upstreamStart := time.Now()
 	var res result
 	var runErr error
-	if direct != nil {
+	outputStream := responseStream{id: rid, stream: responses && stream, reply: &reply, model: t.model, created: start.Unix()}
+	if native != nil {
+		outputStream.chatDelta = t.delta
+		outputStream.store = native.store
+		outputStream.previous = native.previous
+		runErr = a.runResponses(ctx, run, native, owner, contextItems, &outputStream)
+		res = outputStream.result
+		prior = counts{} // Responses usage belongs to this HTTP call.
+	} else if direct != nil {
 		res, runErr = a.generateNamedImage(ctx, run, *direct, func(e imageEvent) error { return reply.write(imagePartial, e) })
 	} else {
 		res, runErr = run.run(ctx, a.servers, t)
@@ -297,7 +367,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	status := errorStatus(ctx, runErr)
 	if trace != nil {
 		trace.model = model
-		if direct == nil {
+		if direct == nil && native == nil {
 			recordHop(ctx, "stdio", "codex/app-server/turn", upstreamStart, hopErr)
 		}
 		if trace.capture {
@@ -308,7 +378,9 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 					safe[i].URL = "[image omitted]"
 				}
 			}
-			if direct != nil {
+			if native != nil {
+				trace.outBody = preview(M{"model": t.model, "input_items": len(contextItems), "stream": true})
+			} else if direct != nil {
 				trace.outBody = preview(direct.providerRequest())
 			} else {
 				trace.outBody = preview(M{"model": t.model, "thread": t.thread, "input": safe})
@@ -354,7 +426,10 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		if e == nil {
 			_, e = tx.Exec("INSERT INTO request_metrics VALUES(?,?,?,?,?,?,?)", rid, used.Cached, used.Reasoning, ttft, speed, estimateCost(model, kind, used), account)
 		}
-		if e == nil && sid != "" && res.metered {
+		if e == nil && native != nil && runErr == nil {
+			e = native.save(tx, sid, owner, rid, &outputStream)
+		}
+		if e == nil && native == nil && sid != "" && res.metered {
 			_, e = tx.Exec(`UPDATE sessions SET last_in=?,last_out=?,updated=? WHERE id=?`, res.total.Input, res.total.Output, now(), sid)
 			if e == nil {
 				_, e = tx.Exec("INSERT INTO session_metrics VALUES(?,?,?) ON CONFLICT(session) DO UPDATE SET cached=excluded.cached,reasoning=excluded.reasoning", sid, res.total.Cached, res.total.Reasoning)
@@ -387,6 +462,16 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			log.Printf("record delivery failure: %v", err)
 		}
 	}()
+	if responses {
+		if stream {
+			var typ string
+			_ = json.Unmarshal(outputStream.terminal["type"], &typ)
+			deliveryErr = reply.write(typ, outputStream.terminal)
+		} else {
+			deliveryErr = reply.finishJSON(outputStream.final)
+		}
+		return
+	}
 	if image {
 		if stream {
 			deliveryErr = reply.write(imageCompleted, imageParams.completedEvent(res))

@@ -79,7 +79,7 @@ func TestInvalidImageOptionsDoNotStartCLI(t *testing.T) {
 
 func TestImageProviderErrorsAndWorkspace(t *testing.T) {
 	for _, origin := range []string{"https://chatgpt.com.example.org", "https://chatgpt.com@other.invalid", "http://chatgpt.com", "https://chatgpt.com:7443", "https://chatgpt.com/extra"} {
-		if _, err := (imageWorkspace{origin, "fixture", "NO_CONSTRAINT"}).endpoint(); err == nil {
+		if _, err := (imageWorkspace{origin, "fixture", "NO_CONSTRAINT"}).endpointFor(imagesPath); err == nil {
 			t.Fatal("accepted an unexpected workspace origin", origin)
 		}
 	}

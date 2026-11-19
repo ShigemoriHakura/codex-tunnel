@@ -28,17 +28,17 @@ import (
 var webFiles embed.FS
 
 type app struct {
-	db               *sql.DB
-	admin, cliHome   string
-	base             runner
-	servers          *appServers
-	imageTransport   http.RoundTripper
-	slots            chan struct{}
-	admitted         chan struct{}
-	sessionTurns     sessionTurns
-	jsonKeepalive    bool
-	installing       sync.Mutex
-	usingResetCredit sync.Mutex
+	db                 *sql.DB
+	admin, cliHome     string
+	base               runner
+	servers            *appServers
+	workspaceTransport http.RoundTripper
+	slots              chan struct{}
+	admitted           chan struct{}
+	sessionTurns       sessionTurns
+	jsonKeepalive      bool
+	installing         sync.Mutex
+	usingResetCredit   sync.Mutex
 }
 type clientFn func(http.ResponseWriter, *http.Request, string)
 
@@ -252,6 +252,7 @@ func (a *app) routes() http.Handler {
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonOut(w, 200, M{"status": "ok"}) })
 	api("GET /v1/models", a.models)
 	api("POST /v1/chat/completions", a.generate)
+	api("POST /v1/responses", a.generate)
 	api("POST /v1/images/generations", a.generate)
 	api("GET /v1/usage", a.usage)
 	api("POST /v1/sessions", a.createSession)
@@ -465,6 +466,10 @@ func upstreamFailure(ctx context.Context, e error) (int, string, string) {
 	status := errorStatus(ctx, e)
 	if status == 499 {
 		return status, "request_canceled", "Request canceled before completion"
+	}
+	var re *responsesError
+	if errors.As(e, &re) {
+		return status, re.code, re.message
 	}
 	var provider *imageProviderError
 	if errors.As(e, &provider) {

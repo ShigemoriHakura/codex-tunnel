@@ -497,7 +497,7 @@ func TestCLIIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.imageTransport = testTransport(func(r *http.Request) (*http.Response, error) {
+	a.workspaceTransport = testTransport(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Scheme != "https" || r.URL.Host != "chatgpt.com" || r.URL.Path != imagesPath {
 			return nil, fmt.Errorf("unexpected image destination")
 		}

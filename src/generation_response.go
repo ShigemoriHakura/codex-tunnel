@@ -11,11 +11,14 @@ import (
 )
 
 type generationResponse struct {
-	w        http.ResponseWriter
-	mu       sync.Mutex
-	opened   bool
-	jsonBody bool
-	image    bool
+	w              http.ResponseWriter
+	mu             sync.Mutex
+	opened         bool
+	jsonBody       bool
+	image          bool
+	responses      bool
+	sequence       int
+	failedResponse responseFields
 }
 
 // Open on the first event or heartbeat. Fast validation and provider errors can
@@ -121,7 +124,11 @@ func (s *generationResponse) reject(status int, code, message string) {
 		return
 	}
 	detail := M{"code": code, "message": message}
-	if s.image {
+	if s.responses && s.failedResponse != nil {
+		s.write("response.failed", s.failedResponse)
+	} else if s.responses {
+		s.write("error", M{"type": "error", "sequence_number": s.sequence, "code": code, "message": message, "param": nil})
+	} else if s.image {
 		s.write("error", M{"type": "error", "error": detail})
 	} else {
 		s.write("", M{"error": detail})

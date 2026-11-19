@@ -67,7 +67,7 @@ proxy_pass_header X-Accel-Buffering;
 
 在“站点设置”填写域名（例如 `https://gateway.example.com`）和访问子目录（例如 `/tools/codex`），保存后控制台入口为 `https://gateway.example.com/tools/codex/`，客户端 Base URL 为 `https://gateway.example.com/tools/codex/v1`。空域名使用当前来源，空目录使用根路径。配置写入 SQLite 并即时生效。当前主机的根入口继续可用，方便从错误配置恢复。域名需解析到网关或反向代理，代理应保留完整请求路径。HTTPS 使用该域名对应的证书。跨域名首次访问需单独登录。
 
-请求日志默认仅采集推理元数据，保留最近 2,000 条，可设为 1 至 10,000 条。切换到全部业务接口可排查模型列表、账户、会话等调用。出站记录包含网关交给 CLI 的调用和发往当前 Codex 工作区 Images 接口的请求，同次请求的两个方向共用请求 ID。正文预览默认关闭。开启后会保存推理文本，每份预览最多约 8 KiB，对话中可能含有敏感信息。鉴权头、管理接口正文及图片字节均省略。
+请求日志默认仅采集推理元数据，保留最近 2,000 条，可设为 1 至 10,000 条。切换到全部业务接口可排查模型列表、账户、会话等调用。出站记录包含网关交给 CLI 的调用和发往 Images 和 Responses 接口的 HTTP 请求，同次请求的两个方向共用请求 ID。正文预览默认关闭。开启后会保存推理文本，每份预览最多约 8 KiB，对话中可能含有敏感信息。鉴权头、管理接口正文及图片字节均省略。
 
 用量统计以每次执行的推理为单位。暂停采集、清空诊断日志或调整保留条数后，累计用量仍可查询。旧记录原有的请求数及用量会计入趋势，CLI 未报告的字段显示“未报告”。首个文本 Token 耗时以网关实际收到文本增量的时间计算。缓存命中率以有缓存计量的输入 Tokens 为分母。生图按成功和失败计数，并显示 CLI 或 Images 接口报告的用量。美元费用按已知模型的标准短上下文文本单价折算，面板列出可估价的请求数。订阅账单以提供方为准。[OpenAI API 价格表](https://developers.openai.com/api/docs/pricing)
 
@@ -77,11 +77,11 @@ proxy_pass_header X-Accel-Buffering;
 
 “接口调试 → 测试内存占用”通过管理员接口 `GET /admin/memory` 即时采样 Go 堆分配量。Linux 还会显示网关进程当前和启动以来的峰值常驻内存（MiB）。查看包含 CLI 子进程的整个容器用量可运行 `docker compose stats --no-stream gateway`。内存采样无需客户端密钥，不启动推理。
 
-未绑定的密钥默认使用临时线程，可发送完整消息序列。要显式续聊，先创建会话，随后每次带上 `X-Session-ID`，只发送本轮用户消息。
+在 Chat Completions 接口中，未绑定的密钥默认使用临时线程，可发送完整消息序列。要显式续聊，先创建会话，随后每次带上 `X-Session-ID`，只发送本轮用户消息。
 
 在“访问密钥 → 会话绑定”选择已有会话，或新建并绑定。该密钥的聊天请求会自动进入固定会话，可省略 `X-Session-ID`。指定其他会话会返回 `403`。客户端若每次重发完整对话，网关会在首次请求中传入这些上下文，之后只追加最后一条用户消息。绑定已有会话会授权该密钥读取并继续该会话，选择“未绑定”可解除授权。撤销或删除密钥即解除固定绑定并终止后续鉴权。删除还会清除凭据摘要并从列表移除密钥，原会话、用量记录和归属仍可在管理员面板查看。
 
-网关启动时会与一个常驻 `codex app-server` 完成 stdio 握手。聊天请求复用这个进程，各线程的流式消息和用量独立分发。客户端断开时，网关向对应轮次发送 `turn/interrupt`，结束后通过 `thread/unsubscribe` 释放订阅。CLI 意外退出会结束当时正在处理的请求，下一个请求会启动新进程。网关不会自动重发已经提交的输入。更换 CLI 版本或更新登录文件、配置文件后，新请求使用新进程，旧进程等已有请求结束后退出。
+网关启动时会与一个常驻 `codex app-server` 完成 stdio 握手。CLI 线程聊天请求复用这个进程，各线程的流式消息和用量独立分发。客户端断开时，网关向对应轮次发送 `turn/interrupt`，结束后通过 `thread/unsubscribe` 释放订阅。CLI 意外退出会结束当时正在处理的请求，下一个请求会启动新进程。网关不会自动重发已经提交的输入。更换 CLI 版本或更新登录文件、配置文件后，新请求使用新进程，旧进程等已有请求结束后退出。
 
 使用 CLI 内置工具生图时，网关按需启动一个单独的常驻进程。`gpt-image-*` 等指定图像模型仍经工作区 Images 接口处理。模型列表、账户状态和限额查询复用常驻连接。读取历史、为指定图像模型获取工作区凭据及重置卡操作使用独立连接。
 
@@ -120,6 +120,7 @@ curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
 | `GET /healthz` | 网关存活探针，不代表上游已登录 |
 | `GET /v1/models` | 从 CLI `model/list` 分页拉取，不硬编码模型 |
 | `POST /v1/chat/completions` | 文本、图片输入与 SSE；支持 `model`、`messages`、`stream`、`stream_options.include_usage` |
+| `POST /v1/responses` | 创建 Responses 对象。支持 JSON、SSE、文本、内联图片、客户端工具调用和连续对话。 |
 | `POST /v1/images/generations` | 返回一张 Base64 图片。`output_format` 支持 `png`（默认）、`jpeg`、`webp`。JPEG 和 WebP 可设 `output_compression`（0–100）；`model` 可使用 `gpt-image-2.5-sunburst` 等图片模型，直接向当前 Codex 登录工作区的 Images 接口提交模型名、尺寸、质量、背景与输出选项。传入 Codex 聊天模型或省略模型名时，保留 CLI 内置工具模式（尺寸和质量为 `auto`） 设置 `stream: true` 使用 SSE。生图等待期间每 3 秒发送并刷新一条 SSE 保活注释，客户端只需处理图片事件。可用 `partial_images` 请求 0–3 张预览；上游只返回整图时，客户端会收到一个 `image_generation.completed` 事件。 |
 | `POST /v1/sessions` | `name`、`model` 都可省略，发送 `{}` 即可 |
 | `GET /v1/sessions` | 本密钥会话，`?offset=100` 翻页，每页最多 100 条 |
@@ -127,13 +128,29 @@ curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
 | `DELETE /v1/sessions/{id}` | 解除绑定；不承诺物理擦除 CLI 历史或备份 |
 | `GET /v1/usage` | 当前密钥已执行的推理请求汇总（含已报告用量的失败请求），并返回聊天速度统计 `avg_tps`、`peak_tps`、`tps_samples` |
 
+### Responses API
+
+使用模型列表中的模型 ID。OpenAI SDK 的 `base_url` 填到 `/v1`，Codex CLI 的自定义提供方使用 `wire_api = "responses"` 和 `supports_websockets = false`。
+
+```sh
+curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5.4","input":"用一句话说明这个项目的用途","stream":true,"store":false}'
+```
+
+省略 `stream` 返回一个包含 `output` 与 `usage` 的 JSON 对象。流式调用返回具名 SSE 事件，如 `response.output_text.delta`、`response.output_item.done` 和 `response.completed`。输入支持字符串、带角色的消息数组、内联 Base64 图片，以及与 `call_id` 匹配的 `function_call_output`。客户端负责执行自己声明的函数。模型和账户决定可用的推理参数与工具。
+
+使用同一密钥传入 `previous_response_id` 可以续聊或从先前的一轮分支。网关默认在本机 SQLite 保存该轮输入及输出以供续聊，独立响应 ID 的有效期为 30 天。`store:false` 关闭按响应 ID 续聊。显式会话和密钥绑定会话会保留对话，后续请求可直接发送新输入。同一会话可以混用 Responses 与 Chat Completions，沿用原有模型、并发队列、用量统计和保活设置。后台任务、托管文件和 WebSocket 传输暂未提供。
+
+### Chat Completions
+
 消息 `content` 支持文本字符串或内容数组，最后一条消息的角色须为 `user`。网关接受客户端回传的 `reasoning_content` 字符串或 `null`，只把可见消息内容送入模型。仅含推理文本的历史助手消息会被跳过。
 
 ```json
 {"messages":[{"role":"user","content":[{"type":"text","text":"图里有什么？"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPoKDcGAAK9ATNQgxqrAAAAAElFTkSuQmCC"}}]}]}
 ```
 
-用户图片通过 Base64 data URL 传入，支持 PNG、JPEG、WebP、GIF。使用图片链接的客户端需先读取图片并转换为 data URL。可选的 `image_url.detail` 支持 `auto`、`high` 和 `original`。图片识别需使用支持视觉输入的上游模型。聊天请求上限为 24 MiB，按 Base64 编码后的整个 JSON 请求体计算；其他 JSON 接口上限为 1 MiB。超出上限返回 `413`。无状态的多条消息会作为带角色的上下文交给 CLI。客户端工具调用、Responses API、`temperature`、批量生图和图片编辑仍不在兼容范围内。未知请求字段返回 `400`。推理超时 10 分钟。上游无计量时返回 `usage: null`，不将其伪装成零消耗。网关累计值是观测值，不含其他应用的调用，不是账单，也不能用来推算订阅余额。
+用户图片通过 Base64 data URL 传入，支持 PNG、JPEG、WebP、GIF。使用图片链接的客户端需先读取图片并转换为 data URL。可选的 `image_url.detail` 支持 `auto`、`high` 和 `original`。图片识别需使用支持视觉输入的上游模型。Chat Completions 和 Responses 的请求上限为 24 MiB，按 Base64 编码后的整个 JSON 请求体计算；其他 JSON 接口上限为 1 MiB。超出上限返回 `413`。无状态的多条消息会作为带角色的上下文交给 CLI。Chat Completions 暂不接受客户端工具调用和 `temperature`。图像接口暂不支持批量生图和图片编辑。未知请求字段返回 `400`。推理超时 10 分钟。上游无计量时返回 `usage: null`，不将其伪装成零消耗。网关累计值是观测值，不含其他应用的调用，不是账单，也不能用来推算订阅余额。
 
 ## 部署、更新与安全
 

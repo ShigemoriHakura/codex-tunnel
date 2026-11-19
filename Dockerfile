@@ -3,7 +3,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY src/ ./src/
-RUN CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /out/desk-tunnel ./src
+RUN --mount=type=cache,id=codex-tunnel-go-build,target=/root/.cache/go-build CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /out/desk-tunnel ./src
 
 FROM node:24-bookworm-slim
 ARG CODEX_VERSION=0.170.0
