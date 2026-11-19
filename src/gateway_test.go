@@ -37,7 +37,9 @@ func testApp(t *testing.T, dir string) *app {
 			t.Fatal(e)
 		}
 	}
-	return &app{db: db, admin: digest(testAdmin), base: runner{os.Getenv("TEST_CODEX_BIN"), home, work}, slots: make(chan struct{}, 2)}
+	a := &app{db: db, admin: digest(testAdmin), base: runner{os.Getenv("TEST_CODEX_BIN"), home, work}}
+	a.initWorkers(2)
+	return a
 }
 func hit(t *testing.T, a *app, method, path, key, payload, sid string, status int) string {
 	t.Helper()
@@ -81,15 +83,16 @@ func TestAccessAndPersistence(t *testing.T) {
 	hit(t, a, "DELETE", "/v1/sessions/"+sid, other, "", "", 404)
 	chat := `{"messages":[{"role":"user","content":"hello"}]}`
 	hit(t, a, "POST", "/v1/chat/completions", other, chat, sid, 404)
-	a.busy.Store(sid, true)
-	hit(t, a, "POST", "/v1/chat/completions", key, chat, sid, 409)
+	_, leave := a.sessionTurns.join(sid, 1)
 	hit(t, a, "DELETE", "/admin/sessions/"+sid, testAdmin, "", "", 409)
-	a.busy.Delete(sid)
-	a.slots <- struct{}{}
-	a.slots <- struct{}{}
+	leave()
+	for range cap(a.admitted) {
+		a.admitted <- struct{}{}
+	}
 	hit(t, a, "POST", "/v1/chat/completions", key, chat, sid, 429)
-	a.release()
-	a.release()
+	for range cap(a.admitted) {
+		<-a.admitted
+	}
 	hit(t, a, "DELETE", "/v1/sessions/"+sid, key, "", "", 200)
 	hit(t, a, "DELETE", "/admin/keys/"+kid, testAdmin, "", "", 200)
 	hit(t, a, "GET", "/v1/usage", key, "", "", 401)

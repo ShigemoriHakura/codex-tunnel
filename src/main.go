@@ -33,7 +33,9 @@ type app struct {
 	base             runner
 	imageTransport   http.RoundTripper
 	slots            chan struct{}
-	busy             sync.Map
+	admitted         chan struct{}
+	sessionTurns     sessionTurns
+	jsonKeepalive    bool
 	installing       sync.Mutex
 	usingResetCredit sync.Mutex
 }
@@ -100,7 +102,12 @@ func main() {
 	if e != nil || n < 1 || n > 64 {
 		log.Fatal("MAX_CONCURRENT must be 1..64")
 	}
-	a := &app{db: db, admin: digest(secret), base: runner{bin, home, work}, cliHome: os.Getenv("CLI_INSTALL_DIR"), slots: make(chan struct{}, n)}
+	jsonKeepalive, e := strconv.ParseBool(env("JSON_KEEPALIVE", "false"))
+	if e != nil {
+		log.Fatal("JSON_KEEPALIVE must be true or false")
+	}
+	a := &app{db: db, admin: digest(secret), base: runner{bin, home, work}, cliHome: os.Getenv("CLI_INSTALL_DIR"), jsonKeepalive: jsonKeepalive}
+	a.initWorkers(n)
 	if a.cliHome != "" && !filepath.IsAbs(a.cliHome) {
 		log.Fatal("CLI_INSTALL_DIR must be absolute")
 	}
@@ -376,19 +383,14 @@ func (a *app) sessions(w http.ResponseWriter, r *http.Request, owner string) {
 	items, e := rows(a.db, `SELECT s.id,s.owner,k.name key_name,s.name,s.model,s.created,s.updated FROM sessions s JOIN keys k ON k.id=s.owner`+where+` ORDER BY s.updated DESC,s.rowid DESC LIMIT 100 OFFSET ?`, append(args, offset(r))...)
 	listOut(w, items, e)
 }
-func (a *app) lock(w http.ResponseWriter, id string) bool {
-	if _, loaded := a.busy.LoadOrStore(id, true); loaded {
-		fail(w, 409, "session_busy", "Another request is active on this session")
-		return false
-	}
-	return true
-}
 func (a *app) deleteSession(w http.ResponseWriter, r *http.Request, owner string) {
 	sid := r.PathValue("id")
-	if !a.lock(w, sid) {
+	_, release := a.sessionTurns.join(sid, 1)
+	if release == nil {
+		fail(w, 409, "session_busy", "Another request is active on this session")
 		return
 	}
-	defer a.busy.Delete(sid)
+	defer release()
 	if boundSession(r) != "" {
 		fail(w, 403, "session_fixed", "A bound key cannot delete sessions")
 		return
@@ -451,23 +453,24 @@ func (a *app) models(w http.ResponseWriter, r *http.Request, _ string) {
 	}
 	jsonOut(w, 200, M{"object": "list", "data": list})
 }
-func upstream(w http.ResponseWriter, ctx context.Context, e error) {
+func upstreamFailure(ctx context.Context, e error) (int, string, string) {
 	status := errorStatus(ctx, e)
 	if status == 499 {
-		fail(w, status, "request_canceled", "Request canceled before completion")
-		return
+		return status, "request_canceled", "Request canceled before completion"
 	}
 	var provider *imageProviderError
 	if errors.As(e, &provider) {
-		fail(w, status, "image_provider_error", provider.Error())
-		return
+		return status, "image_provider_error", provider.Error()
 	}
 	log.Printf("Upstream request failed: %v", e)
 	if errors.Is(e, errNoImage) {
-		fail(w, 502, "image_unavailable", "Codex did not return an image. Check that your login, model and quota support the built-in image tool.")
-		return
+		return 502, "image_unavailable", "Codex did not return an image. Check that your login, model and quota support the built-in image tool."
 	}
-	fail(w, status, "upstream_error", "Codex CLI unavailable or request failed; check login, model support and quota")
+	return status, "upstream_error", "Codex CLI unavailable or request failed; check login, model support and quota"
+}
+func upstream(w http.ResponseWriter, ctx context.Context, err error) {
+	status, code, message := upstreamFailure(ctx, err)
+	fail(w, status, code, message)
 }
 func (a *app) accountRead(w http.ResponseWriter, r *http.Request, _ string) {
 	if !a.acquire(w) {

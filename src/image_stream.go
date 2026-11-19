@@ -3,16 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
 	"io"
-	"net/http"
 	"strings"
-	"sync"
-	"time"
 )
 
 const (
@@ -35,77 +31,6 @@ type imageEvent struct {
 	Type  string `json:"type"`
 	Bytes []byte `json:"b64_json"`
 	Index *int   `json:"partial_image_index,omitempty"`
-}
-
-type imageStream struct {
-	w      http.ResponseWriter
-	mu     sync.Mutex
-	opened bool
-}
-
-// Open on the first image or heartbeat. Fast validation and provider errors can
-// still use an ordinary HTTP status before the first stream bytes are committed.
-func (s *imageStream) openLocked() {
-	if !s.opened {
-		s.w.Header().Set("Content-Type", "text/event-stream")
-		s.w.Header().Set("Cache-Control", "no-cache, no-transform")
-		s.w.Header().Set("X-Accel-Buffering", "no")
-		s.opened = true
-	}
-}
-
-func (s *imageStream) write(kind string, value any) error {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.openLocked()
-	if _, err = fmt.Fprintf(s.w, "event: %s\ndata: ", kind); err != nil {
-		return err
-	}
-	if _, err = s.w.Write(data); err != nil {
-		return err
-	}
-	if _, err = io.WriteString(s.w, "\n\n"); err != nil {
-		return err
-	}
-	return http.NewResponseController(s.w).Flush()
-}
-
-func (s *imageStream) heartbeat() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.openLocked()
-	if _, err := io.WriteString(s.w, ": keep-alive\n\n"); err != nil {
-		return err
-	}
-	return http.NewResponseController(s.w).Flush()
-}
-
-// Only this timer and the provider preview callback can write concurrently.
-// Stop and join it before recording the outcome or sending a terminal event.
-func (s *imageStream) startHeartbeats(ctx context.Context, cancel context.CancelFunc, interval time.Duration) func() {
-	life, stop := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		tick := time.NewTicker(interval)
-		defer tick.Stop()
-		for {
-			select {
-			case <-life.Done():
-				return
-			case <-tick.C:
-				if s.heartbeat() != nil {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	return func() { stop(); <-done }
 }
 
 func (b imageRequest) metadata(meta imageMetadata) imageMetadata {

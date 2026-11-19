@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -58,7 +58,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	var output imageOutput
 	var direct *imageRequest
 	var imageParams imageRequest
-	images := imageStream{w: w}
+	reply := generationResponse{w: w, image: image}
 	stream, includeUsage := false, false
 	kind := "chat"
 	rid := id("chatcmpl-")
@@ -73,10 +73,14 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		}
 	}
 	w.Header().Set("X-Request-ID", rid)
-	if !a.acquire(w) {
+	select {
+	case a.admitted <- struct{}{}:
+		defer func() { <-a.admitted }()
+	default:
+		w.Header().Set("Retry-After", "2")
+		fail(w, 429, "busy", "The generation queue is full")
 		return
 	}
-	defer a.release()
 	if image {
 		kind = "image"
 		b := &imageParams
@@ -149,41 +153,6 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		trace.model = t.model
 		trace.stream = &stream
 	}
-	var prior counts
-	if sid != "" {
-		if !a.lock(w, sid) {
-			return
-		}
-		defer a.busy.Delete(sid)
-		var model string
-		e := a.db.QueryRow(`SELECT s.thread,s.model,s.last_in,s.last_out,m.cached,m.reasoning FROM sessions s LEFT JOIN session_metrics m ON s.id=m.session WHERE s.id=? AND (s.owner=? OR EXISTS(SELECT 1 FROM key_bindings b WHERE b.key_id=? AND b.session=s.id))`, sid, owner, owner).Scan(&t.thread, &model, &prior.Input, &prior.Output, &prior.Cached, &prior.Reasoning)
-		if errors.Is(e, sql.ErrNoRows) {
-			fail(w, 404, "not_found", "Session not found")
-			return
-		}
-		if e != nil {
-			internal(w, e)
-			return
-		}
-		if t.thread != "" && latest.Role != "" {
-			t.input, e = latest.parts()
-			if e != nil {
-				fail(w, 400, "invalid_messages", e.Error())
-				return
-			}
-		}
-		if model != "" {
-			if t.model != "" && t.model != model {
-				fail(w, 400, "model_mismatch", "Create a new session to switch models")
-				return
-			}
-			t.model = model
-		}
-		t.onThread = func(thread, model string) error {
-			_, e := a.db.Exec(`UPDATE sessions SET thread=?,model=?,updated=? WHERE id=?`, thread, model, now(), sid)
-			return e
-		}
-	}
 	run, e := a.current()
 	if e != nil {
 		internal(w, e)
@@ -191,18 +160,91 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
+	reply.jsonBody = !stream
+	stopHeartbeat := func() {}
+	reject := func(status int, code, message string) {
+		stopHeartbeat()
+		reply.reject(status, code, message)
+	}
+	var prior counts
+	var pinnedModel string
+	readSession := func() bool {
+		err := a.db.QueryRowContext(ctx, `SELECT s.thread,s.model,s.last_in,s.last_out,m.cached,m.reasoning FROM sessions s LEFT JOIN session_metrics m ON s.id=m.session WHERE s.id=? AND (s.owner=? OR EXISTS(SELECT 1 FROM key_bindings b WHERE b.key_id=? AND b.session=s.id))`, sid, owner, owner).Scan(&t.thread, &pinnedModel, &prior.Input, &prior.Output, &prior.Cached, &prior.Reasoning)
+		switch {
+		case ctx.Err() != nil:
+			reject(errorStatus(ctx, ctx.Err()), "request_interrupted", "Request interrupted while loading the session")
+		case errors.Is(err, sql.ErrNoRows):
+			reject(404, "not_found", "Session not found")
+		case err != nil:
+			log.Printf("load session: %v", err)
+			reject(500, "storage_error", "Gateway storage error")
+		case pinnedModel != "" && t.model != "" && pinnedModel != t.model:
+			reject(400, "model_mismatch", "Create a new session to switch models")
+		default:
+			return true
+		}
+		return false
+	}
+	var ready <-chan struct{}
+	var refreshSession bool
+	if sid != "" {
+		var leave func()
+		ready, leave = a.sessionTurns.join(sid, cap(a.admitted)-cap(a.slots))
+		if leave == nil {
+			w.Header().Set("Retry-After", "2")
+			fail(w, 429, "busy", "The session queue is full")
+			return
+		}
+		defer leave()
+		select {
+		case <-ready:
+		default:
+			refreshSession = true
+		}
+		if !readSession() {
+			return
+		}
+	}
+	if stream || a.jsonKeepalive {
+		stopHeartbeat = reply.startHeartbeats(ctx, cancel, 3*time.Second)
+		defer stopHeartbeat()
+	}
+	if err := a.waitForWorker(ctx, ready); err != nil {
+		if errors.Is(err, context.Canceled) {
+			reject(499, "request_canceled", "Request canceled while waiting for a worker")
+		} else {
+			reject(504, "queue_timeout", "Request timed out in the generation queue")
+		}
+		return
+	}
+	releaseWorker := sync.OnceFunc(a.release)
+	defer releaseWorker()
+	if sid != "" {
+		// The preceding turn may have created the thread or changed its cumulative usage.
+		if refreshSession && !readSession() {
+			return
+		}
+		if t.thread != "" && latest.Role != "" {
+			t.input, e = latest.parts()
+			if e != nil {
+				reject(400, "invalid_messages", e.Error())
+				return
+			}
+		}
+		if pinnedModel != "" {
+			t.model = pinnedModel
+		}
+		t.onThread = func(thread, model string) error {
+			_, e := a.db.Exec(`UPDATE sessions SET thread=?,model=?,updated=? WHERE id=?`, thread, model, now(), sid)
+			return e
+		}
+	}
 	opened := false
 	model := t.model
 	chunk := func(delta M, finish any) M {
 		return M{"id": rid, "object": "chat.completion.chunk", "created": start.Unix(), "model": model, "choices": []M{{"index": 0, "delta": delta, "finish_reason": finish}}}
 	}
-	send := func(v any) error {
-		data, _ := json.Marshal(v)
-		if _, e := fmt.Fprintf(w, "data: %s\n\n", data); e != nil {
-			return e
-		}
-		return http.NewResponseController(w).Flush()
-	}
+	send := func(v any) error { return reply.write("", v) }
 	if stream && !image {
 		bind := t.onThread
 		t.onThread = func(thread, m string) error {
@@ -215,8 +257,6 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		t.delta = func(d string) error {
 			if !opened {
 				opened = true
-				w.Header().Set("Content-Type", "text/event-stream")
-				w.Header().Set("X-Accel-Buffering", "no")
 				if e := send(chunk(M{"role": "assistant"}, nil)); e != nil {
 					return e
 				}
@@ -227,22 +267,16 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	upstreamStart := time.Now()
 	var res result
 	var runErr error
-	var stopHeartbeats func()
-	if image && stream {
-		stopHeartbeats = images.startHeartbeats(ctx, cancel, 3*time.Second)
-		defer stopHeartbeats()
-	}
 	if direct != nil {
-		res, runErr = a.generateNamedImage(ctx, run, *direct, func(e imageEvent) error { return images.write(imagePartial, e) })
+		res, runErr = a.generateNamedImage(ctx, run, *direct, func(e imageEvent) error { return reply.write(imagePartial, e) })
 	} else {
 		res, runErr = run.run(ctx, t)
 		if runErr == nil && image {
 			res.image, runErr = output.encode(res.image)
 		}
 	}
-	if stopHeartbeats != nil {
-		stopHeartbeats()
-	}
+	releaseWorker()
+	stopHeartbeat()
 	ended := time.Now()
 	if res.model != "" {
 		model = res.model
@@ -257,7 +291,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	}
 	// Upstream can finish at the same moment the downstream proxy disconnects.
 	hopErr := runErr
-	if image && stream && runErr == nil {
+	if runErr == nil {
 		runErr = ctx.Err()
 	}
 	status := errorStatus(ctx, runErr)
@@ -331,58 +365,34 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		}
 	}
 	if e != nil {
-		if images.opened {
-			images.write("error", M{"type": "error", "error": M{"code": "storage_error", "message": "Could not save request usage"}})
-			if trace != nil {
-				trace.status, trace.code, trace.message = 500, "storage_error", "Could not save request usage"
-			}
-		} else if !opened {
-			internal(w, e)
-		} else {
-			if trace != nil {
-				trace.status, trace.code, trace.message = 500, "storage_error", "Could not save request usage"
-			}
-			send(M{"error": M{"code": "storage_error", "message": "Could not save request usage"}})
-		}
+		log.Printf("save generation usage: %v", e)
+		reply.reject(500, "storage_error", "Could not save request usage")
 		return
 	}
 	if runErr != nil {
-		if status == 499 && image && stream {
-			return
-		}
-		if images.opened {
-			code, msg := "upstream_error", "Image generation stream ended before completion"
-			var provider *imageProviderError
-			if errors.As(runErr, &provider) {
-				code, msg = "image_provider_error", provider.Error()
-			}
-			images.write("error", M{"type": "error", "error": M{"code": code, "message": msg}})
-			if trace != nil {
-				trace.code, trace.message = code, msg
-			}
-		} else if !opened {
-			upstream(w, ctx, runErr)
-		} else {
-			log.Printf("stream failed: %v", runErr)
-			send(M{"error": M{"code": "upstream_error", "message": "Codex turn did not complete"}})
-			fmt.Fprint(w, "data: [DONE]\n\n")
-		}
+		status, code, message := upstreamFailure(ctx, runErr)
+		reply.reject(status, code, message)
 		return
 	}
-	if image {
-		if stream {
-			if writeErr := images.write(imageCompleted, imageParams.completedEvent(res)); writeErr != nil {
-				// Keep reported upstream usage even if the client left during delivery.
-				if trace != nil {
-					trace.status, trace.code, trace.message = 499, "delivery_failed", "Connection closed while delivering the final image"
-				}
-				if _, err := a.db.Exec("UPDATE requests SET status=? WHERE id=?", 499, rid); err != nil {
-					log.Printf("record image delivery failure: %v", err)
-				}
-			}
+	// Preserve upstream usage while recording delivery failures separately.
+	var deliveryErr error
+	defer func() {
+		if deliveryErr == nil {
 			return
 		}
-		jsonOut(w, 200, M{"created": start.Unix(), "output_format": output.Format, "data": []M{{"b64_json": res.image}}})
+		if trace != nil {
+			trace.status, trace.code, trace.message = 499, "delivery_failed", "Connection closed while delivering the response"
+		}
+		if _, err := a.db.Exec("UPDATE requests SET status=499 WHERE id=?", rid); err != nil {
+			log.Printf("record delivery failure: %v", err)
+		}
+	}()
+	if image {
+		if stream {
+			deliveryErr = reply.write(imageCompleted, imageParams.completedEvent(res))
+		} else {
+			deliveryErr = reply.finishJSON(M{"created": start.Unix(), "output_format": output.Format, "data": []M{{"b64_json": res.image}}})
+		}
 		return
 	}
 	var usage any
@@ -391,19 +401,25 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	}
 	if stream {
 		if !opened {
-			if e = t.delta(res.text); e != nil {
+			if deliveryErr = t.delta(res.text); deliveryErr != nil {
 				return
 			}
 		}
-		send(chunk(M{}, "stop"))
+		if deliveryErr = send(chunk(M{}, "stop")); deliveryErr != nil {
+			return
+		}
 		if includeUsage {
 			c := chunk(nil, nil)
 			c["choices"] = []M{}
 			c["usage"] = usage
-			send(c)
+			if deliveryErr = send(c); deliveryErr != nil {
+				return
+			}
 		}
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		if _, deliveryErr = fmt.Fprint(w, "data: [DONE]\n\n"); deliveryErr == nil {
+			deliveryErr = http.NewResponseController(w).Flush()
+		}
 		return
 	}
-	jsonOut(w, 200, M{"id": rid, "object": "chat.completion", "created": start.Unix(), "model": model, "choices": []M{{"index": 0, "message": message{"assistant", res.text}, "finish_reason": "stop"}}, "usage": usage})
+	deliveryErr = reply.finishJSON(M{"id": rid, "object": "chat.completion", "created": start.Unix(), "model": model, "choices": []M{{"index": 0, "message": message{"assistant", res.text}, "finish_reason": "stop"}}, "usage": usage})
 }

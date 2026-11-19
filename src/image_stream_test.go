@@ -53,7 +53,7 @@ func (w failedImageWriter) FlushError() error { return io.ErrClosedPipe }
 func TestImageHeartbeatCancelsFailedDelivery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := imageStream{w: failedImageWriter{httptest.NewRecorder()}}
+	s := generationResponse{w: failedImageWriter{httptest.NewRecorder()}}
 	stop := s.startHeartbeats(ctx, cancel, time.Millisecond)
 	defer stop()
 	select {

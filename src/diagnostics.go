@@ -86,10 +86,11 @@ type observedWriter struct {
 
 func (w *observedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w *observedWriter) WriteHeader(status int) {
-	if !w.wrote {
-		w.trace.status = status
-		w.wrote = true
+	if w.wrote {
+		return
 	}
+	w.trace.status = status
+	w.wrote = true
 	w.ResponseWriter.WriteHeader(status)
 }
 func (w *observedWriter) Write(b []byte) (int, error) {

@@ -12,6 +12,7 @@ services:
       LISTEN_ADDR: "0.0.0.0:${PORT:-56439}"
       ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env first}
       MAX_CONCURRENT: ${MAX_CONCURRENT:-4}
+      JSON_KEEPALIVE: "${JSON_KEEPALIVE:-false}"
     volumes:
       - gateway_data:/srv/data
       - codex_home:/srv/codex
