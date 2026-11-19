@@ -13,7 +13,13 @@ import (
 // Fetch on demand from the CLI, never duplicate conversation bodies in the gateway database.
 func (a *app) history(w http.ResponseWriter, r *http.Request, owner string) {
 	var thread string
-	e := a.db.QueryRow(`SELECT thread FROM sessions WHERE id=? AND (?='' OR owner=?)`, r.PathValue("id"), owner, owner).Scan(&thread)
+	sid := r.PathValue("id")
+	bound := boundSession(r)
+	if bound != "" && sid != bound {
+		fail(w, 404, "not_found", "Session not found")
+		return
+	}
+	e := a.db.QueryRow(`SELECT thread FROM sessions s WHERE id=? AND (?='' OR owner=? OR EXISTS(SELECT 1 FROM key_bindings b WHERE b.key_id=? AND b.session=s.id))`, sid, owner, owner, owner).Scan(&thread)
 	if errors.Is(e, sql.ErrNoRows) {
 		fail(w, 404, "not_found", "Session not found")
 		return
@@ -43,29 +49,50 @@ func (a *app) history(w http.ResponseWriter, r *http.Request, owner string) {
 		return
 	}
 	defer p.close()
-	args := M{"threadId": thread, "itemsView": "full", "limit": 10, "sortDirection": "desc"}
-	if c := r.URL.Query().Get("cursor"); c != "" {
-		args["cursor"] = c
-	}
-	b, e := p.call("thread/turns/list", args, nil)
-	if e != nil {
-		upstream(w, ctx, e)
-		return
-	}
-	var page struct {
-		Data []struct {
-			ID, Status string
-			Items      []struct {
-				Type, Text, Phase string
-				Content           []struct{ Type, Text string }
-			}
+	// Keep each CLI reply within the frame limit even when consecutive turns contain large images.
+	data := []M{}
+	cursor := r.URL.Query().Get("cursor")
+	for len(data) < 10 {
+		args := M{"threadId": thread, "itemsView": "full", "limit": 1, "sortDirection": "desc"}
+		if cursor != "" {
+			args["cursor"] = cursor
 		}
-		NextCursor string
+		raw, err := p.call("thread/turns/list", args, nil)
+		if err != nil {
+			upstream(w, ctx, err)
+			return
+		}
+		var page historyPage
+		if err = json.Unmarshal(raw, &page); err != nil {
+			upstream(w, ctx, err)
+			return
+		}
+		data = append(data, page.messages()...)
+		if page.NextCursor == "" {
+			cursor = ""
+			break
+		}
+		if len(page.Data) == 0 || page.NextCursor == cursor {
+			upstream(w, ctx, errors.New("invalid turn history cursor"))
+			return
+		}
+		cursor = page.NextCursor
 	}
-	if e = json.Unmarshal(b, &page); e != nil {
-		upstream(w, ctx, e)
-		return
+	jsonOut(w, 200, M{"data": data, "next_cursor": cursor})
+}
+
+type historyPage struct {
+	Data []struct {
+		ID, Status string
+		Items      []struct {
+			Type, Text, Phase string
+			Content           []struct{ Type, Text string }
+		}
 	}
+	NextCursor string
+}
+
+func (page historyPage) messages() []M {
 	data := []M{}
 	for _, t := range page.Data {
 		messages := []message{}
@@ -74,6 +101,9 @@ func (a *app) history(w http.ResponseWriter, r *http.Request, owner string) {
 			case "userMessage":
 				var text strings.Builder
 				for _, part := range i.Content {
+					if part.Type == "image" || part.Type == "localImage" {
+						text.WriteString("[Image]")
+					}
 					if part.Type == "text" {
 						text.WriteString(part.Text)
 					}
@@ -87,5 +117,5 @@ func (a *app) history(w http.ResponseWriter, r *http.Request, owner string) {
 		}
 		data = append(data, M{"id": t.ID, "status": t.Status, "messages": messages})
 	}
-	jsonOut(w, 200, M{"data": data, "next_cursor": page.NextCursor})
+	return data
 }

@@ -49,6 +49,11 @@ func allowConsoleWrite(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
+func sessionCookie(r *http.Request, path string) *http.Cookie {
+	return &http.Cookie{Name: consoleCookie, Path: path, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")}
+}
+
 func (a *app) consoleSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		ok, err := a.hasConsoleSession(r)
@@ -62,8 +67,9 @@ func (a *app) consoleSession(w http.ResponseWriter, r *http.Request) {
 	if !allowConsoleWrite(w, r) {
 		return
 	}
-	cookie := &http.Cookie{Name: consoleCookie, Path: "/admin", HttpOnly: true, SameSite: http.SameSiteStrictMode,
-		Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")}
+	// The browser knows the public /admin/session URL even when a relay strips its prefix.
+	// Omitting Path scopes both login and logout to that URL's /admin directory.
+	cookie := sessionCookie(r, "")
 	previous := a.presentedSession(r)
 	if r.Method == http.MethodDelete {
 		if previous != "" {

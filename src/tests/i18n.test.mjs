@@ -26,11 +26,11 @@ test("catalogs agree on keys and interpolation parameters", () => {
 test("static markup and literal application references exist in the catalogs", () => {
   const read = (file) => readFileSync(new URL(file, import.meta.url), "utf8");
   const html = read("../web/index.html");
-  const app = ["app.js", "monitor.mjs", "trends.mjs"].map(f => read("../web/" + f)).join("\n");
+  const app = ["app.js", "monitor.mjs", "trends.mjs", "site.mjs", "dashboard.mjs", "key-binding.mjs"].map(f => read("../web/" + f)).join("\n");
   for (const [, key] of [
     ...html.matchAll(/data-i18n="([^"]+)"/g),
     ...app.matchAll(/\b(?:text|msg)\(\s*"([\w.-]+)"(?!\s*\+)/g),
-    ...app.matchAll(/"(monitor\.[\w-]+|trend\.[\w-]+)"/g),
+    ...app.matchAll(/"(monitor\.[\w-]+|trend\.[\w-]+|board\.[\w-]+|site\.[\w-]+)"/g),
   ])
     assert.ok(Object.hasOwn(en, key), key);
   for (const page of [
@@ -43,6 +43,7 @@ test("static markup and literal application references exist in the catalogs", (
     "models",
     "cli",
     "play",
+    "site",
   ])
     for (const prefix of ["nav", "desc"])
       assert.ok(Object.hasOwn(en, `${prefix}.${page}`));

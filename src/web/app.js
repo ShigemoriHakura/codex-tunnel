@@ -1,3 +1,7 @@
+import {editBinding} from "./key-binding.mjs";
+import {dashboardView} from "./dashboard.mjs";
+import {apiPath, siteView} from "./site.mjs";
+import {icon} from "./icons.mjs";
 import { logsView, errorsView } from "./monitor.mjs";
 import { usageView } from "./trends.mjs";
 import {
@@ -13,7 +17,7 @@ import {
 } from "./i18n.mjs";
 
 const $ = (id) => document.getElementById(id);
-const pages = ["overview", "keys", "sessions", "stats", "logs", "errors", "models", "cli", "play"];
+const pages = ["overview", "keys", "sessions", "stats", "logs", "errors", "models", "cli", "play", "site"];
 initLanguage();
 const themePicker = $("theme");
 function applyTheme(value) {
@@ -76,7 +80,7 @@ async function req(path, { method = "GET", data, signal } = {}) {
 async function requestJSON(path, options) {
   let r;
   try {
-    r = await fetch(path, options);
+    r = await fetch(apiPath(path), options);
   } catch {
     throw uiError(msg("error.network"));
   }
@@ -174,7 +178,9 @@ async function render() {
   writeText($("title"), msg(`nav.${page}`));
   writeText($("desc"), msg(`desc.${page}`));
   $("pagePicker").value = page;
-  for (const entry of $("nav").children) {
+  writeText($("crumb"), msg(`nav.${page}`));
+  $("title").hidden = $("desc").hidden = page === "overview";
+  for (const entry of $("nav").querySelectorAll("[data-page]")) {
     const selected = entry.dataset.page === page;
     entry.classList.toggle("active", selected);
     if (selected) entry.setAttribute("aria-current", "page");
@@ -192,18 +198,16 @@ async function render() {
     status.remove();
   }
 }
-const navSymbols = {overview: "▦", stats: "▥", errors: "!", keys: "⚿", sessions: "▤", logs: "≡", models: "◫", cli: "›_", play: "▷"};
 function navigate(page) {
   filter = "";
   return goto(page);
 }
-for (const key of pages) {
+for (const key of ["overview","keys","sessions","models","play","stats","logs","errors","cli","site"]) {
   const entry = button(msg(`nav.${key}`), () => navigate(key));
-  const icon = el("span", navSymbols[key], "nav-icon");
-  icon.setAttribute("aria-hidden", "true");
-  entry.prepend(icon);
+  entry.prepend(icon(key));
   entry.dataset.page = key;
-  $("nav").append(entry);
+  const group = ["overview","keys","sessions","models","play"].includes(key) ? "workspaceNav" : "controlNav";
+  $(group).append(entry);
   const option = el("option", msg(`nav.${key}`));
   option.value = key;
   $("pagePicker").append(option);
@@ -251,7 +255,81 @@ function quotaWindow(minutes, index) {
   if (minutes % 60 === 0) return msg("quota.hours", { n: number(minutes / 60) });
   return msg("quota.minutes", { n: number(minutes) });
 }
-function renderQuota(data) {
+const resetAttempts = new Map();
+function resetAttempt(key) {
+  let attempt = resetAttempts.get(key);
+  try { attempt ||= sessionStorage.getItem(key); } catch { /* Storage is optional. */ }
+  if (!attempt) {
+    // getRandomValues is also available on the gateway's plain HTTP listener.
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+    attempt = [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
+    try { sessionStorage.setItem(key, attempt); } catch { /* Keep the in-memory copy. */ }
+  }
+  resetAttempts.set(key, attempt);
+  return attempt;
+}
+function creditName(card) {
+  return card ? card.title || card.description || card.id || "—" : msg("quota.unlistedCredit");
+}
+function creditExpired(card) {
+  return card?.expiresAt != null && card.expiresAt <= Date.now() / 1000;
+}
+function creditStatus(card) {
+  const status = card?.status || (card ? "unknown" : "available");
+  if (status === "available" && creditExpired(card)) return msg("card.expired");
+  return hasMessage(`card.${status}`) ? msg(`card.${status}`) : status;
+}
+function creditUseButton(card, identity, hasCredit, useCredit) {
+  const action = el("button", msg("quota.useCredit"), "credit-use");
+  action.type = "button";
+  action.disabled = !identity || !hasCredit || (card && (!card.id || card.status !== "available")) || creditExpired(card);
+  action.setAttribute("aria-haspopup", "dialog");
+  action.onclick = () => {
+    if (creditExpired(card)) {
+      action.disabled = true;
+      notice(msg("quota.creditExpired"));
+      return;
+    }
+    const dialog = el("dialog", undefined, "log-detail credit-dialog");
+    const title = el("h2", msg("quota.confirmTitle"));
+    title.id = "credit-dialog-title";
+    const description = el("p", msg(card ? "quota.confirmUse" : "quota.confirmUnlisted"));
+    description.id = "credit-dialog-description";
+    dialog.setAttribute("aria-labelledby", title.id);
+    dialog.setAttribute("aria-describedby", description.id);
+    const details = el("dl");
+    details.append(el("dt", msg("quota.account")), el("dd", identity),
+      el("dt", msg("col.name")), el("dd", creditName(card)));
+    if (card?.id && card.id !== creditName(card)) {
+      details.append(el("dt", msg("quota.creditId")), el("dd", card.id));
+    }
+    if (card?.expiresAt != null) {
+      details.append(el("dt", msg("quota.expires")), el("dd", dateTime(card.expiresAt)));
+    }
+    const actions = el("div", undefined, "toolbar");
+    const cancel = button(msg("common.cancel"), () => dialog.close());
+    cancel.autofocus = true;
+    actions.append(cancel, button(msg("quota.confirmButton"), async () => {
+      if (!dialog.open || !action.isConnected) return;
+      dialog.close();
+      if (creditExpired(card)) {
+        action.disabled = true;
+        notice(msg("quota.creditExpired"));
+        return;
+      }
+      await useCredit(card?.id || "", identity);
+    }, "primary"));
+    dialog.append(title, details, description, actions);
+    action.after(dialog);
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    dialog.showModal();
+  };
+  return action;
+}
+function renderQuota(data, accountIdentity, useCredit) {
   const result = document.createDocumentFragment();
   const buckets = { ...data.rateLimitsByLimitId };
   const main = data.rateLimits;
@@ -285,16 +363,19 @@ function renderQuota(data) {
     cardHeader.append(el("small", msg("quota.cardsUnknown")));
   }
   result.append(cardHeader);
-  if (cards && Array.isArray(cards.credits) && cards.credits.length) {
-    table(result, [msg("col.name"), msg("col.status"), msg("quota.granted"), msg("quota.expires")],
-      cards.credits, [
-        (c) => c.title || c.description || c.id,
-        (c) => hasMessage(`card.${c.status}`) ? msg(`card.${c.status}`) : c.status,
-        (c) => c.grantedAt != null ? dateTime(c.grantedAt) : "—",
-        (c) => c.expiresAt != null ? dateTime(c.expiresAt) : "—",
+  const credits = Array.isArray(cards?.credits) ? cards.credits : [];
+  if (credits.length || cards?.availableCount > 0) {
+    const list = el("div", undefined, "credit-list");
+    // Without individual IDs the upstream can only redeem the next available credit.
+    table(list, ["col.name", "col.status", "quota.granted", "quota.expires", "col.actions"].map(key => msg(key)),
+      credits.length ? credits : [null], [
+        creditName,
+        creditStatus,
+        c => c?.grantedAt != null ? dateTime(c.grantedAt) : "—",
+        c => c?.expiresAt != null ? dateTime(c.expiresAt) : "—",
+        c => creditUseButton(c, accountIdentity, cards.availableCount !== 0, useCredit),
       ]);
-  } else if (cards?.availableCount > 0) {
-    result.append(el("small", msg("quota.noCardDetails")));
+    result.append(list);
   }
   const raw = el("details");
   raw.append(el("summary", msg("quota.raw")), el("pre", JSON.stringify(data, null, 2)));
@@ -304,78 +385,13 @@ function renderQuota(data) {
 
 const monitorUI = { el, button, req, panel, table };
 const views = {
-  async overview(root) {
-    const [u, l] = await Promise.all([
-      req("/admin/usage"),
-      req("/admin/requests"),
-    ]);
-    const grid = el("div", undefined, "stats");
-    for (const [k, label] of Object.entries({
-      requests: msg("usage.requests"),
-      input_tokens: msg("usage.input"),
-      output_tokens: msg("usage.output"),
-      images: msg("usage.images"),
-    })) {
-      const box = el("div", undefined, "stat");
-      box.append(el("small", label), el("b", number(u[k])));
-      grid.append(box);
-    }
-    root.append(
-      grid,
-      el(
-        "p",
-        msg("usage.summary", {
-          errors: number(u.errors),
-          unmetered: number(u.unmetered_requests),
-        }),
-        "summary",
-      ),
-    );
-    const tools = el("div", undefined, "overview-tools");
-    root.append(tools);
-    const [latency, latencyBar] = panel(tools, msg("overview.latency"));
-    latencyBar.append(button(msg("nav.stats"), () => goto("stats")));
-    const recent = l.data.slice(0, 24).reverse();
-    if (recent.length) {
-      const durations = recent.map(row => row.latency_ms);
-      const peak = Math.max(...durations);
-      const average = Math.round(durations.reduce((sum, ms) => sum + ms, 0) / durations.length);
-      const chart = el("div", undefined, "latency-bars");
-      chart.setAttribute("aria-hidden", "true");
-      for (const ms of durations) {
-        const bar = el("span");
-        bar.style.height = `${ms / Math.max(peak, 1) * 100}%`;
-        bar.title = `${ms} ms`;
-        chart.append(bar);
-      }
-      latency.append(chart, el("p", msg("overview.sample", {
-        n: number(recent.length), average: number(average), peak: number(peak),
-      })));
-    } else {
-      latency.append(el("p", msg("overview.noLatency"), "empty"));
-    }
-    const [api, apiBar] = panel(tools, msg("overview.endpoint"));
-    const baseURL = new URL("/v1", location.origin).href;
-    const address = el("code", baseURL, "endpoint");
-    apiBar.append(button(msg("overview.copy"), async () => {
-      try {
-        await navigator.clipboard.writeText(baseURL);
-        notice(msg("overview.copied"));
-      } catch {
-        const range = document.createRange();
-        range.selectNodeContents(address);
-        const selection = window.getSelection();
-        selection.removeAllRanges();
-        selection.addRange(range);
-        notice(msg("overview.selected"));
-      }
-    }));
-    api.append(el("p", msg("overview.endpointHint")), address);
-    const [s, bar] = panel(root, msg("usage.recent"));
-    bar.append(button(msg("usage.all"), () => goto("logs")));
-    logTable(s, l.data.slice(0, 8));
+  overview(root,signal) {
+    return dashboardView(root,{...monitorUI,logTable,navigate,notice},signal);
   },
-  async keys(root) {
+  site(root,signal) {
+    return siteView(root,{...monitorUI,field},signal);
+  },
+  async keys(root,signal) {
     const [s] = panel(root, msg("keys.issue")),
       [lab, name] = field(msg("keys.name")),
       line = el("div", undefined, "toolbar");
@@ -402,36 +418,29 @@ const views = {
     s.append(line);
     const l = await req("/admin/keys?offset=" + offset),
       [list] = panel(root, msg("keys.list"));
-    table(
-      list,
-      [
-        msg("col.name"),
-        msg("col.id"),
-        msg("col.created"),
-        msg("col.status"),
-        msg("col.actions"),
-      ],
-      l.data,
-      [
-        "name",
-        "id",
-        (i) => dateTime(i.created),
-        (i) => (i.revoked ? msg("keys.revoked") : msg("keys.active")),
-        (i) =>
-          i.revoked
-            ? "—"
-            : button(
-                msg("keys.revoke"),
-                async () => {
-                  if (confirm(text("keys.confirm", { name: i.name }))) {
-                    await req("/admin/keys/" + i.id, { method: "DELETE" });
-                    await render();
-                  }
-                },
-                "warn",
-              ),
-      ],
-    );
+    table(list,
+      ["col.name","col.id","col.created","col.status","keys.binding","col.actions"].map(k=>msg(k)),
+      l.data,[
+        "name","id",i=>dateTime(i.created),i=>msg(i.revoked?"keys.revoked":"keys.active"),
+        i=>i.session_name || msg("keys.unbound"),
+        i=>{
+          const actions=el("div",undefined,"toolbar");
+          if(!i.revoked) actions.append(
+            button(msg("keys.manageBind"),()=>editBinding(root,i,{el,req,button,field},render,signal)),
+            button(msg("keys.revoke"),async()=>{
+              if(confirm(text("keys.confirm",{name:i.name}))){
+                await req("/admin/keys/"+i.id,{method:"DELETE",signal});await render();
+              }
+            })
+          );
+          actions.append(button(msg("keys.delete"),async()=>{
+            if(confirm(text("keys.deleteConfirm",{name:i.name}))){
+              await req("/admin/keys/"+i.id+"/record",{method:"DELETE",signal});await render();
+            }
+          },"warn"));
+          return actions;
+        }
+      ]);
     pager(list, l.data.length);
   },
   async sessions(root) {
@@ -527,13 +536,16 @@ const views = {
       accountBody = el("div"),
       [quota] = panel(root, msg("quota.title")),
       quotaBody = el("div"),
+      resetStatus = el("p"),
       [models, modelBar] = panel(root, msg("models.available")),
       modelBody = el("div");
     account.append(accountBody);
-    quota.append(quotaBody);
+    resetStatus.setAttribute("role", "status");
+    resetStatus.hidden = true;
+    quota.append(resetStatus, quotaBody);
     models.append(modelBody);
     const loadAccount = async () => {
-      let skipQuota;
+      let skipQuota, accountIdentity;
       quotaBody.replaceChildren(el("p", msg("common.loading")));
       await loadPanel(accountBody, async () => {
         const { account, requiresOpenaiAuth } = await req("/admin/account");
@@ -542,6 +554,7 @@ const views = {
           return el("p", msg(requiresOpenaiAuth ? "account.signedOut" : "account.external"));
         }
         if (account.type !== "chatgpt") skipQuota = msg("quota.unsupported");
+        else accountIdentity = [account.email, account.workspaceName].filter(Boolean).join(" · ") || "ChatGPT";
         return el("p", msg("account.signedIn", {
           identity: [account.type, account.email, account.workspaceName, account.planType]
             .filter(Boolean).join(" · "),
@@ -549,7 +562,30 @@ const views = {
       });
       if (!root.isConnected) return;
       if (skipQuota) quotaBody.replaceChildren(el("p", skipQuota));
-      else await loadPanel(quotaBody, async () => renderQuota(await req("/admin/quota")));
+      else await loadPanel(quotaBody, async () => renderQuota(await req("/admin/quota"), accountIdentity, useCredit));
+    };
+    const useCredit = async (creditId, identity) => {
+      if (quotaBody.inert) return;
+      const key = "desk-tunnel.reset." + JSON.stringify([apiPath("/admin/quota").pathname, identity, creditId]);
+      const payload = { confirmed: true, idempotencyKey: resetAttempt(key) };
+      if (creditId) payload.creditId = creditId;
+      quotaBody.inert = true;
+      resetStatus.hidden = false;
+      writeText(resetStatus, msg("quota.working"));
+      try {
+        const { outcome } = await req("/admin/quota/reset-credit", { method: "POST", data: payload });
+        if (!hasMessage(`quota.outcome.${outcome}`)) throw uiError(msg("error.reset_outcome_unknown"));
+        resetAttempts.delete(key);
+        try { sessionStorage.removeItem(key); } catch { /* Storage is optional. */ }
+        writeText(resetStatus, msg(`quota.outcome.${outcome}`));
+      } catch (err) {
+        writeText(resetStatus, err.status ? err.localized || err.message : msg("error.reset_outcome_unknown"));
+      }
+      try {
+        if (root.isConnected) await loadAccount();
+      } finally {
+        quotaBody.inert = false;
+      }
     };
     const loadModels = () => loadPanel(modelBody, async () => {
       const list = document.createDocumentFragment();

@@ -110,7 +110,7 @@ func (a *app) analytics(w http.ResponseWriter, r *http.Request, _ string) {
 	defer tx.Rollback()
 	where := " WHERE r.created<=?"
 	args := []any{stop}
-	for _, f := range []struct{ key, col string }{{"owner", "r.owner"}, {"model", "r.model"}} {
+	for _, f := range []struct{ key, col string }{{"owner", "r.owner"}, {"model", "r.model"}, {"kind", "r.kind"}} {
 		if v := strings.TrimSpace(q.Get(f.key)); v != "" {
 			where += " AND " + f.col + "=?"
 			args = append(args, v)
@@ -150,9 +150,18 @@ func (a *app) analytics(w http.ResponseWriter, r *http.Request, _ string) {
 		internal(w, e)
 		return
 	}
+	report := M{"summary": summary[0], "lifetime": lifetime[0], "buckets": buckets, "models": models, "keys": keys, "start": start, "end": stop, "step": seconds}
+	if q.Get("recent") == "1" {
+		recent, err := rows(tx, "SELECT r.*,k.name key_name"+ledger+where+" ORDER BY r.created DESC,r.rowid DESC LIMIT 8", args...)
+		if err != nil {
+			internal(w, err)
+			return
+		}
+		report["recent"] = recent
+	}
 	if e = tx.Commit(); e != nil {
 		internal(w, e)
 		return
 	}
-	jsonOut(w, 200, M{"summary": summary[0], "lifetime": lifetime[0], "buckets": buckets, "models": models, "keys": keys, "start": start, "end": stop, "step": seconds})
+	jsonOut(w, 200, report)
 }

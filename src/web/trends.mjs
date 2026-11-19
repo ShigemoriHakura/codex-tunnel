@@ -8,7 +8,7 @@ const periods = [1, 6, 24, 72, 168, 720, 2160].map((hours) => [
     : msg("quota.days", { n: hours / 24 }),
 ]);
 periods.push(["all", msg("trend.allTime")]);
-const colors = ["#428ce1", "#12a780", "#b47ce3"];
+const colors = ["#0284c7", "#059669", "#b45309"];
 const tokenSeries = [
   ["input", "usage.input"],
   ["output", "usage.output"],

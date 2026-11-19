@@ -199,16 +199,19 @@ type counts struct {
 	Reasoning *int64 `json:"reasoningOutputTokens"`
 }
 type result struct {
-	firstToken         time.Time
-	text, image, model string
-	total              counts
-	metered            bool
+	firstToken  time.Time
+	text, model string
+	image       []byte
+	imageMeta   imageMetadata
+	total       counts
+	metered     bool
 }
 type turn struct {
-	thread, model, prompt string
-	persist, image        bool
-	onThread              func(string, string) error
-	delta                 func(string) error
+	thread, model  string
+	input          []turnInput
+	persist, image bool
+	onThread       func(string, string) error
+	delta          func(string) error
 }
 
 func (r runner) run(ctx context.Context, t turn) (res result, err error) {
@@ -308,7 +311,7 @@ func (r runner) run(ctx context.Context, t turn) (res result, err error) {
 		}
 		return nil
 	}
-	b, e = p.call("turn/start", M{"threadId": thread, "environments": []any{}, "input": []M{{"type": "text", "text": t.prompt}}}, event)
+	b, e = p.call("turn/start", M{"threadId": thread, "environments": []any{}, "input": t.input}, event)
 	if e != nil {
 		return res, e
 	}
@@ -326,7 +329,7 @@ func (r runner) run(ctx context.Context, t turn) (res result, err error) {
 			return res, e
 		}
 	}
-	if t.image && res.image == "" {
+	if t.image && len(res.image) == 0 {
 		return res, errNoImage
 	}
 	if !t.image && res.text == "" {
@@ -334,38 +337,38 @@ func (r runner) run(ctx context.Context, t turn) (res result, err error) {
 	}
 	return res, nil
 }
-func (r runner) imageData(thread, inline, path string) (string, error) {
-	const limit = 24 << 20
+func (r runner) imageData(thread, inline, path string) ([]byte, error) {
+	const limit = maxGeneratedImageBytes
 	var data []byte
 	var err error
 	if inline != "" {
 		if len(inline) > base64.StdEncoding.EncodedLen(limit) {
-			return "", errors.New("image too large")
+			return nil, errors.New("image too large")
 		}
 		data, err = base64.StdEncoding.DecodeString(inline)
 	} else {
 		if thread == "" || thread == "." || thread == ".." || filepath.Base(thread) != thread {
-			return "", errors.New("invalid thread")
+			return nil, errors.New("invalid thread")
 		}
 		root := filepath.Join(r.home, "generated_images", thread)
 		rel, e := filepath.Rel(root, path)
 		if e != nil || !filepath.IsLocal(rel) {
-			return "", errors.New("image unavailable outside thread directory")
+			return nil, errors.New("image unavailable outside thread directory")
 		}
 		dir, e := os.OpenRoot(root)
 		if e != nil {
-			return "", e
+			return nil, e
 		}
 		defer dir.Close()
 		f, e := dir.Open(rel)
 		if e != nil {
-			return "", e
+			return nil, e
 		}
 		defer f.Close()
 		data, err = io.ReadAll(io.LimitReader(f, limit+1))
 	}
 	if err != nil || len(data) > limit || !strings.HasPrefix(http.DetectContentType(data), "image/") {
-		return "", errors.New("invalid generated image")
+		return nil, errors.New("invalid generated image")
 	}
-	return base64.StdEncoding.EncodeToString(data), nil
+	return data, nil
 }

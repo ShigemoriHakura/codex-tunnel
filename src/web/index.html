@@ -4,16 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title data-i18n="document.title">Desk Tunnel · 网关控制台</title>
-    <link rel="stylesheet" href="/style.css" />
-    <script type="module" src="/app.js"></script>
+    <title data-i18n="document.title">Codex Tunnel · 网关控制台</title>
+    <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./utilities.css" />
+    <script type="module" src="./app.js"></script>
   </head>
   <body>
     <div id="sessionCheck" class="login" role="status" data-i18n="common.loading">正在加载…</div>
     <div id="login" class="login" hidden>
       <form id="signin" class="login-card">
         <div class="login-top">
-          <div class="brand"><span class="mark" aria-hidden="true"></span> Desk Tunnel</div>
+          <div class="brand"><span class="mark" aria-hidden="true">CT</span> Codex Tunnel</div>
           <label class="language"><span class="sr-only" data-i18n="shell.language">语言</span><select data-language></select></label>
         </div>
         <h1 data-i18n="login.title">网关控制台</h1>
@@ -27,8 +28,11 @@
     </div>
     <div id="shell" hidden>
       <aside>
-        <div class="brand"><span class="mark" aria-hidden="true"></span> Desk Tunnel</div>
-        <nav id="nav"></nav>
+        <div class="brand"><span class="mark" aria-hidden="true">CT</span> Codex Tunnel</div>
+        <nav id="nav">
+          <div class="grid gap-1"><p class="nav-label" data-i18n="shell.operations">工作区</p><div id="workspaceNav" class="grid gap-1"></div></div>
+          <div class="grid gap-1"><p class="nav-label" data-i18n="shell.observability">监控与管理</p><div id="controlNav" class="grid gap-1"></div></div>
+        </nav>
         <label class="mobile-nav"><span class="sr-only" data-i18n="shell.control">控制面板</span><select id="pagePicker"></select></label>
         <div class="aside-foot">
           <span class="connected" data-i18n="shell.connected">网关已连接</span>
@@ -36,7 +40,7 @@
       </aside>
       <main>
         <header>
-          <span class="console-label" data-i18n="shell.brandLabel">网关管理</span>
+          <div class="console-label hidden items-center gap-2 md:flex"><span data-i18n="shell.brandLabel">网关管理</span><span aria-hidden="true">/</span><span id="crumb"></span></div>
           <div class="preferences">
             <label><span class="sr-only" data-i18n="shell.theme">配色</span>
               <select id="theme">

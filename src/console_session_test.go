@@ -2,7 +2,9 @@ package main
 
 import (
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +49,7 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 			t.Fatal("expected one cookie")
 		}
 		c := cookies[0]
-		if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode || c.Path != "/admin" || c.Domain != "" || c.MaxAge != int(consoleTTL.Seconds()) || c.Expires.Before(time.Now()) || len(c.Value) != 48 {
+		if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode || c.Path != "" || c.Domain != "" || c.MaxAge != int(consoleTTL.Seconds()) || c.Expires.Before(time.Now()) || len(c.Value) != 48 {
 			t.Fatal("invalid session cookie")
 		}
 		if strings.Contains(w.Body.String(), c.Value) {
@@ -58,6 +60,22 @@ func TestConsoleSessionLifecycle(t *testing.T) {
 	state(nil, false)
 	call("POST", endpoint, "wrong", nil, true, 401)
 	first := login(nil)
+	for _, prefix := range []string{"", "/codex"} {
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		public := &url.URL{Scheme: "https", Host: "console.example", Path: prefix + endpoint}
+		jar.SetCookies(public, []*http.Cookie{first})
+		public.Path = prefix + "/admin/quota"
+		if len(jar.Cookies(public)) != 1 {
+			t.Fatal("browser cannot use the session behind this relay", prefix)
+		}
+		public.Path = prefix + "/v1/models"
+		if len(jar.Cookies(public)) != 0 {
+			t.Fatal("console cookie escaped the admin directory")
+		}
+	}
 	state(first, true)
 	var stored string
 	if err := a.db.QueryRow("SELECT digest FROM console_sessions").Scan(&stored); err != nil || stored != a.consoleDigest(first.Value) {

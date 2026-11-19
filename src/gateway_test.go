@@ -1,16 +1,22 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/jpeg"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -115,7 +121,7 @@ func TestAdminDiagnostics(t *testing.T) {
 	}
 }
 
-const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5c8AAAAASUVORK5CYII="
+const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPoKDcGAAK9ATNQgxqrAAAAAElFTkSuQmCC"
 
 func TestImageScope(t *testing.T) {
 	a := testApp(t, t.TempDir())
@@ -131,7 +137,7 @@ func TestImageScope(t *testing.T) {
 			t.Fatal("unconfined file read")
 		}
 	}
-	if x, e := r.imageData("abc", "", filepath.Join(dir, "out.png")); e != nil || x != png {
+	if x, e := r.imageData("abc", "", filepath.Join(dir, "out.png")); e != nil || base64.StdEncoding.EncodeToString(x) != png {
 		t.Fatal(x, e)
 	}
 }
@@ -146,11 +152,22 @@ func TestCLIIntegration(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "")
 	d := t.TempDir()
 	a := testApp(t, d)
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	t.Setenv("NO_PROXY", "127.0.0.1,localhost,::1")
+	allowPreview := make(chan struct{})
+	allowFinal := make(chan struct{})
+	var fallbackCalls atomic.Int32
+	var smallImage, largeImage, namedImage atomic.Bool
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/accounts/check") {
+			origin := "https://" + r.Host
+			if namedImage.Load() {
+				origin = "https://chatgpt.com"
+			}
 			jsonOut(w, 200, M{"accounts": []M{{
 				"account_id": "loopback-test", "id": "loopback-test",
-				"workspace_backend_origin": "https://" + r.Host, "account_routing_override": "NO_CONSTRAINT",
+				"workspace_backend_origin": origin, "account_routing_override": "NO_CONSTRAINT",
 			}}})
 			return
 		}
@@ -177,6 +194,54 @@ func TestCLIIntegration(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
+		if r.URL.Path == imagesPath {
+			var body M
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if r.Header.Get("x-codex-image-turn-id") == "" || !namedImage.Load() || r.Header.Get("Authorization") != "Bearer mock-only" || r.Header.Get("ChatGPT-Account-Id") != "loopback-test" ||
+				body["model"] != "gpt-image-2.5-sunburst" || body["quality"] != "max" || body["size"] != "1536x1024" || body["output_format"] != "webp" || body["output_compression"] != float64(86) || body["background"] != "opaque" || body["response_format"] != nil {
+				t.Error("incorrect image model, options, or workspace authorization")
+			}
+			if body["prompt"] == "json-only" {
+				fallbackCalls.Add(1)
+				if body["stream"] == true {
+					jsonOut(w, 400, M{"error": M{"code": "unsupported_parameter", "param": "stream"}})
+					return
+				}
+				if body["partial_images"] != nil {
+					t.Error("preview option on JSON fallback")
+				}
+			} else if body["stream"] == true {
+				if body["partial_images"] != float64(1) || !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+					t.Error("missing stream negotiation")
+				}
+				// Simulate an image upstream that sends no headers or bytes until the preview is ready.
+				select {
+				case <-allowPreview:
+				case <-time.After(30 * time.Second):
+					t.Error("downstream timed out waiting for image keep-alives")
+					return
+				case <-r.Context().Done():
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+				fmt.Fprintf(w, "event: %s\ndata: {\"type\":%q,\"b64_json\":%q,\"partial_image_index\":0}\n\n", imagePartial, imagePartial, png)
+				w.(http.Flusher).Flush()
+				select {
+				case <-allowFinal:
+				case <-time.After(15 * time.Second):
+					t.Error("preview was buffered until completion")
+					return
+				case <-r.Context().Done():
+					return
+				}
+				fmt.Fprintf(w, "event: %s\ndata: {\"type\":%q,\"b64_json\":%q,\"usage\":{\"input_tokens\":11,\"output_tokens\":20,\"total_tokens\":31}}\n\n", imageCompleted, imageCompleted, png)
+				return
+			}
+			jsonOut(w, 200, M{"data": []M{{"b64_json": png}}, "usage": M{"input_tokens": 12, "output_tokens": 60}})
+			return
+		}
 		if r.URL.Path == "/v1/images/generations" {
 			jsonOut(w, 200, M{"created": 1, "data": []M{{"b64_json": png}}})
 			return
@@ -186,6 +251,7 @@ func TestCLIIntegration(t *testing.T) {
 			return
 		}
 		var q struct {
+			Model string
 			Tools []struct{ Name, Type string }
 			Input json.RawMessage
 		}
@@ -193,12 +259,73 @@ func TestCLIIntegration(t *testing.T) {
 			t.Error(e)
 			return
 		}
+		var inputs []struct {
+			Role    string
+			Content []struct {
+				Type, Text string
+				Image      string `json:"image_url"`
+			}
+		}
+		if err := json.Unmarshal(q.Input, &inputs); err != nil {
+			t.Error(err)
+		}
+		for _, m := range inputs {
+			if m.Role != "user" {
+				continue
+			}
+			size := 0
+			images := []string{}
+			for _, p := range m.Content {
+				switch p.Text {
+				case "Say hello":
+					size = 1
+				case "again":
+					size = 600
+				}
+				if strings.Contains(p.Text, "previous answer") {
+					t.Error("client replay was forwarded to an existing thread")
+				}
+				if p.Type == "input_image" {
+					images = append(images, p.Image)
+				}
+			}
+			if size == 0 {
+				continue
+			}
+			wantCount := 1
+			if size == 1 {
+				wantCount = 2
+			}
+			if len(images) != wantCount {
+				t.Errorf("expected %d typed images on %d pixel turn, got %d", wantCount, size, len(images))
+				continue
+			}
+			if size == 1 && images[1] != images[0] {
+				t.Error("second fixture image changed")
+			}
+			_, encoded, ok := strings.Cut(images[0], ",")
+			if !ok {
+				t.Error("expected a data URL")
+				continue
+			}
+			cfg, _, err := image.DecodeConfig(base64.NewDecoder(base64.StdEncoding, strings.NewReader(encoded)))
+			if err != nil || cfg.Width != size || cfg.Height != size {
+				t.Errorf("unexpected upstream image dimensions %dx%d, expected %dx%d: %v", cfg.Width, cfg.Height, size, size, err)
+			} else if size == 1 {
+				smallImage.Store(true)
+			} else {
+				largeImage.Store(true)
+			}
+		}
 		draw := false
 		for _, tool := range q.Tools {
 			if tool.Name != "image_gen" {
 				t.Errorf("unexpected enabled tool %s/%s", tool.Type, tool.Name)
 			} else {
 				draw = true
+				if q.Model == "gpt-image-2" {
+					t.Error("image engine was used as a thread model")
+				}
 			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -243,9 +370,9 @@ stream_max_retries=0
 	if out := hit(t, a, "GET", "/admin/account", testAdmin, "", "", 200); !strings.Contains(out, `"type":"apiKey"`) {
 		t.Fatal(out)
 	}
-	key, _ := newKey(t, a)
+	key, kid := newKey(t, a)
 	sid := prop(hit(t, a, "POST", "/v1/sessions", key, `{}`, "", 201), "id")
-	chat := `{"messages":[{"role":"user","content":"Say hello"}]}`
+	chat := visionPayload(t, "Say hello", false, "data:image/png;base64,"+png, "data:image/png;base64,"+png)
 	out := hit(t, a, "POST", "/v1/chat/completions", key, chat, sid, 200)
 	if !strings.Contains(out, `"total_tokens":15`) {
 		t.Fatal(out)
@@ -253,15 +380,19 @@ stream_max_retries=0
 	a.db.Close()
 	a = testApp(t, d)
 	hit(t, a, "PATCH", "/admin/diagnostics/settings", testAdmin, `{"capture_body":true}`, "", 200)
-	stream := `{"stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"again"}]}`
-	out = hit(t, a, "POST", "/v1/chat/completions", key, stream, sid, 200)
+	hit(t, a, "PUT", "/admin/keys/"+kid+"/binding", testAdmin, `{"session_id":"`+sid+`"}`, "", 200)
+	stream := visionPayload(t, "again", true, "data:image/png;base64,"+fixtureImage(t))
+	out = hit(t, a, "POST", "/v1/chat/completions", key, stream, "", 200)
 	for _, want := range []string{"hello", "data: [DONE]", `"total_tokens":15`} {
 		if !strings.Contains(out, want) {
 			t.Fatal(out)
 		}
 	}
+	if !smallImage.Load() || !largeImage.Load() {
+		t.Fatalf("both new images must reach the provider: small=%v large=%v", smallImage.Load(), largeImage.Load())
+	}
 	out = hit(t, a, "GET", "/v1/sessions/"+sid+"/history", key, "", "", 200)
-	if !strings.Contains(out, "again") || !strings.Contains(out, "Say hello") {
+	if !strings.Contains(out, "[Image]") || !strings.Contains(out, "again") || !strings.Contains(out, "Say hello") {
 		t.Fatal(out)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -277,9 +408,19 @@ stream_max_retries=0
 	if e := os.WriteFile(filepath.Join(a.base.home, "auth.json"), auth, 0600); e != nil {
 		t.Fatal(e)
 	}
-	out = hit(t, a, "POST", "/v1/images/generations", key, `{"prompt":"draw"}`, "", 200)
-	if !strings.Contains(out, png) {
-		t.Fatal(out)
+	out = hit(t, a, "POST", "/v1/images/generations", key, `{"prompt":"draw","model":"gpt-5.4","size":"auto","quality":"auto","background":"auto","output_format":"jpeg","output_compression":85,"response_format":"b64_json"}`, "", 200)
+	var generated struct {
+		OutputFormat string `json:"output_format"`
+		Data         []struct {
+			Bytes []byte `json:"b64_json"`
+		}
+	}
+	decode(t, out, &generated)
+	if generated.OutputFormat != "jpeg" || len(generated.Data) != 1 {
+		t.Fatal("missing generated JPEG")
+	}
+	if _, format, err := image.Decode(bytes.NewReader(generated.Data[0].Bytes)); err != nil || format != "jpeg" {
+		t.Fatal("requested JPEG did not decode", format, err)
 	}
 	if out := hit(t, a, "GET", "/admin/account", testAdmin, "", "", 200); !strings.Contains(out, `"type":"chatgpt"`) {
 		t.Fatal(out)
@@ -312,7 +453,11 @@ stream_max_retries=0
 			Cost              *float64
 			Response          *string `json:"response_body"`
 		}
-		decode(t, hit(t, a, "GET", fmt.Sprintf("/admin/diagnostics/logs/%d", row.Seq), testAdmin, "", "", 200), &detail)
+		raw := hit(t, a, "GET", fmt.Sprintf("/admin/diagnostics/logs/%d", row.Seq), testAdmin, "", "", 200)
+		if strings.Contains(raw, "data:image/") || strings.Contains(raw, png[:16]) {
+			t.Fatal("image leaked to diagnostics")
+		}
+		decode(t, raw, &detail)
 		if detail.Cached == nil || *detail.Cached != 4 || detail.Reasoning == nil || *detail.Reasoning != 2 || detail.TTFT == nil || detail.Cost == nil {
 			t.Fatalf("invalid turn metrics: %+v", detail)
 		}
@@ -356,4 +501,106 @@ stream_max_retries=0
 		t.Fatal(s)
 	}
 
+	namedImage.Store(true)
+	mockURL, err := url.Parse(mock.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.imageTransport = testTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Scheme != "https" || r.URL.Host != "chatgpt.com" || r.URL.Path != imagesPath {
+			return nil, fmt.Errorf("unexpected image destination")
+		}
+		req := r.Clone(r.Context())
+		req.URL.Scheme, req.URL.Host = mockURL.Scheme, mockURL.Host
+		req.Host = mockURL.Host
+		return mock.Client().Transport.RoundTrip(req)
+	})
+	out = hit(t, a, "POST", "/v1/images/generations", key, `{"prompt":"fixture","model":"gpt-image-2.5-sunburst","quality":"max","size":"1536x1024","background":"opaque","output_format":"webp","output_compression":86,"response_format":"b64_json"}`, "", 200)
+	decode(t, out, &generated)
+	if generated.OutputFormat != "webp" || len(generated.Data) != 1 {
+		t.Fatal("missing Sunburst output")
+	}
+	if _, format, err := image.Decode(bytes.NewReader(generated.Data[0].Bytes)); err != nil || format != "webp" {
+		t.Fatal("bad Sunburst output", err)
+	}
+	var calls int
+	if err := a.db.QueryRow("SELECT count(*) FROM requests WHERE model='gpt-image-2.5-sunburst' AND input=12 AND output=60 AND status=200").Scan(&calls); err != nil || calls != 1 {
+		t.Fatal("missing image usage", err)
+	}
+	srv := httptest.NewServer(a.routes())
+	defer srv.Close()
+	payload := `{"model":"gpt-image-2.5-sunburst","quality":"max","size":"1536x1024","background":"opaque","output_format":"webp","output_compression":86,"stream":true,"partial_images":1,"prompt":"stream-fixture"}`
+	req, err := http.NewRequest("POST", srv.URL+"/v1/images/generations", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if !isEventStream(resp.Header.Get("Content-Type")) || resp.StatusCode != 200 {
+		t.Fatal("missing image SSE response", resp.StatusCode)
+	}
+	reader := bufio.NewReader(resp.Body)
+	for i := 0; i < 2; i++ {
+		line, err := reader.ReadString('\n')
+		if err != nil || line != ": keep-alive\n" {
+			t.Fatalf("expected flushed image heartbeat, got %q (%v)", line, err)
+		}
+		if end, err := reader.ReadString('\n'); err != nil || end != "\n" {
+			t.Fatal("incomplete SSE comment")
+		}
+	}
+	close(allowPreview)
+	readEvent := func(want string) imageEvent {
+		t.Helper()
+		name, err := reader.ReadString('\n')
+		for err == nil && (strings.HasPrefix(name, ":") || strings.TrimSpace(name) == "") {
+			name, err = reader.ReadString('\n')
+		}
+		if err != nil || strings.TrimSpace(name) != "event: "+want {
+			t.Fatal("unexpected event", name, err)
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		var e imageEvent
+		if err = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &e); err != nil || e.Type != want {
+			t.Fatal("invalid event", err)
+		}
+		if _, format, err := image.Decode(bytes.NewReader(e.Bytes)); err != nil || format != "webp" {
+			t.Fatal("invalid streamed image")
+		}
+		if end, err := reader.ReadString('\n'); err != nil || end != "\n" {
+			t.Fatal("incomplete SSE framing")
+		}
+		return e
+	}
+	part := readEvent(imagePartial)
+	close(allowFinal)
+	if part.Index == nil || *part.Index != 0 {
+		t.Fatal("missing preview index")
+	}
+	final := readEvent(imageCompleted)
+	if final.Size != "1x1" {
+		t.Fatal("stream completion reported requested dimensions instead of encoded dimensions")
+	}
+	if !strings.Contains(string(final.Usage), `"total_tokens":31`) {
+		t.Fatal("missing final image usage")
+	}
+	if err := a.db.QueryRow("SELECT count(*) FROM requests WHERE model='gpt-image-2.5-sunburst' AND input=11 AND output=20 AND status=200").Scan(&calls); err != nil || calls != 1 {
+		t.Fatal("stream usage was not recorded once", err)
+	}
+	fallback := hit(t, a, "POST", "/v1/images/generations", key, strings.Replace(payload, "stream-fixture", "json-only", 1), "", 200)
+	if fallbackCalls.Load() != 2 || !strings.Contains(fallback, "event: "+imageCompleted) || strings.Contains(fallback, imagePartial) {
+		t.Fatal("invalid JSON provider fallback")
+	}
+
 }
+
+type testTransport func(*http.Request) (*http.Response, error)
+
+func (f testTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

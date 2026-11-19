@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -27,12 +28,14 @@ import (
 var webFiles embed.FS
 
 type app struct {
-	db             *sql.DB
-	admin, cliHome string
-	base           runner
-	slots          chan struct{}
-	busy           sync.Map
-	installing     sync.Mutex
+	db               *sql.DB
+	admin, cliHome   string
+	base             runner
+	imageTransport   http.RoundTripper
+	slots            chan struct{}
+	busy             sync.Map
+	installing       sync.Mutex
+	usingResetCredit sync.Mutex
 }
 type clientFn func(http.ResponseWriter, *http.Request, string)
 
@@ -151,15 +154,40 @@ func internal(w http.ResponseWriter, e error) {
 	fail(w, 500, "storage_error", "Gateway storage error")
 }
 func body(w http.ResponseWriter, r *http.Request, v any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	d := json.NewDecoder(r.Body)
-	d.DisallowUnknownFields()
-	if e := d.Decode(v); e != nil || d.Decode(new(any)) != io.EOF {
-		fail(w, 400, "invalid_request", "Invalid JSON, unsupported field, or body exceeds 1 MiB")
+	return boundedBody(w, r, v, 1<<20)
+}
+func boundedBody(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
+	if r.ContentLength > limit {
+		fail(w, 413, "body_too_large", fmt.Sprintf("Request body exceeds %d MiB", limit>>20))
 		return false
 	}
-	return true
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	d := json.NewDecoder(r.Body)
+	d.DisallowUnknownFields()
+	err := d.Decode(v)
+	if err == nil {
+		if err = d.Decode(new(json.RawMessage)); err == io.EOF {
+			return true
+		}
+	}
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		fail(w, 413, "body_too_large", fmt.Sprintf("Request body exceeds %d MiB", limit>>20))
+		return false
+	}
+	if err != nil && strings.HasPrefix(err.Error(), "json: unknown field ") {
+		field := strings.TrimPrefix(err.Error(), "json: unknown field ")
+		if len(field) <= 64 && strings.IndexFunc(strings.Trim(field, "\""), func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '_' || r >= '0' && r <= '9')
+		}) < 0 {
+			fail(w, 400, "unsupported_field", "Unsupported request field "+field)
+			return false
+		}
+	}
+	fail(w, 400, "invalid_request", "Invalid JSON or unexpected field type")
+	return false
 }
+
 func (a *app) auth(admin bool, fn clientFn) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if admin {
@@ -182,13 +210,13 @@ func (a *app) auth(admin bool, fn clientFn) http.HandlerFunc {
 				}
 			}
 		} else if key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && key != "" {
-			var owner string
-			e := a.db.QueryRow(`SELECT id FROM keys WHERE hash=? AND revoked=0`, digest(key)).Scan(&owner)
+			var owner, binding string
+			e := a.db.QueryRow(`SELECT k.id,COALESCE(b.session,'') FROM keys k LEFT JOIN key_bindings b ON b.key_id=k.id WHERE k.hash=? AND k.revoked=0`, digest(key)).Scan(&owner, &binding)
 			if e == nil {
 				if t := tracing(r.Context()); t != nil {
 					t.owner = owner
 				}
-				fn(w, r, owner)
+				fn(w, withBinding(r, binding), owner)
 				return
 			}
 			if !errors.Is(e, sql.ErrNoRows) {
@@ -226,9 +254,13 @@ func (a *app) routes() http.Handler {
 		adm(method+" /admin/diagnostics/errors", a.errorGroups)
 	}
 	adm("GET /admin/analytics", a.analytics)
+	adm("GET /admin/site", a.siteSettings)
+	adm("PUT /admin/site", a.siteSettings)
 	adm("GET /admin/keys", a.keys)
 	adm("POST /admin/keys", a.keys)
-	adm("DELETE /admin/keys/{id}", a.keys)
+	adm("DELETE /admin/keys/{id}", a.keyState)
+	adm("DELETE /admin/keys/{id}/record", a.keyState)
+	adm("PUT /admin/keys/{id}/binding", a.keyBinding)
 	adm("GET /admin/usage", a.usage)
 	adm("GET /admin/requests", a.logs)
 	adm("GET /admin/sessions", a.sessions)
@@ -237,12 +269,13 @@ func (a *app) routes() http.Handler {
 	adm("GET /admin/models", a.models)
 	adm("GET /admin/account", a.accountRead)
 	adm("GET /admin/quota", a.accountRead)
+	adm("POST /admin/quota/reset-credit", a.consumeResetCredit)
 	adm("GET /admin/memory", memoryUsage)
 	adm("GET /admin/cli", a.cliStatus)
 	adm("POST /admin/cli/update", a.cliUpdate)
 	sub, _ := fs.Sub(webFiles, "web")
 	m.Handle("GET /", http.FileServer(http.FS(sub)))
-	observed := a.observe(m)
+	observed := a.serveMount(a.observe(m))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -281,11 +314,8 @@ func (a *app) keys(w http.ResponseWriter, r *http.Request, _ string) {
 			return
 		}
 		jsonOut(w, 201, M{"id": kid, "key": k})
-	case "DELETE":
-		res, e := a.db.Exec(`UPDATE keys SET revoked=1 WHERE id=? AND revoked=0`, r.PathValue("id"))
-		changed(w, res, e)
 	default:
-		items, e := rows(a.db, `SELECT id,name,created,revoked FROM keys ORDER BY created DESC,rowid DESC LIMIT 100 OFFSET ?`, offset(r))
+		items, e := rows(a.db, `SELECT k.id,k.name,k.created,k.revoked,b.session AS session_id,s.name AS session_name FROM keys k LEFT JOIN key_bindings b ON k.id=b.key_id LEFT JOIN sessions s ON s.id=b.session WHERE k.revoked<>? ORDER BY k.created DESC,k.rowid DESC LIMIT 100 OFFSET ?`, keyDeleted, offset(r))
 		listOut(w, items, e)
 	}
 }
@@ -310,6 +340,10 @@ func changed(w http.ResponseWriter, res sql.Result, e error) {
 	jsonOut(w, 200, M{"ok": true})
 }
 func (a *app) createSession(w http.ResponseWriter, r *http.Request, owner string) {
+	if boundSession(r) != "" {
+		fail(w, 403, "session_fixed", "This key is fixed to an existing session")
+		return
+	}
 	var b struct{ Name, Model string }
 	if !body(w, r, &b) {
 		return
@@ -330,7 +364,16 @@ func (a *app) createSession(w http.ResponseWriter, r *http.Request, owner string
 	jsonOut(w, 201, M{"id": sid, "name": b.Name, "model": b.Model})
 }
 func (a *app) sessions(w http.ResponseWriter, r *http.Request, owner string) {
-	items, e := rows(a.db, `SELECT s.id,s.owner,k.name key_name,s.name,s.model,s.created,s.updated FROM sessions s JOIN keys k ON k.id=s.owner WHERE (?='' OR s.owner=?) ORDER BY s.updated DESC,s.rowid DESC LIMIT 100 OFFSET ?`, owner, owner, offset(r))
+	where := ""
+	var args []any
+	if sid := boundSession(r); sid != "" {
+		where = " WHERE s.id=?"
+		args = append(args, sid)
+	} else if owner != "" {
+		where = " WHERE s.owner=?"
+		args = append(args, owner)
+	}
+	items, e := rows(a.db, `SELECT s.id,s.owner,k.name key_name,s.name,s.model,s.created,s.updated FROM sessions s JOIN keys k ON k.id=s.owner`+where+` ORDER BY s.updated DESC,s.rowid DESC LIMIT 100 OFFSET ?`, append(args, offset(r))...)
 	listOut(w, items, e)
 }
 func (a *app) lock(w http.ResponseWriter, id string) bool {
@@ -346,8 +389,35 @@ func (a *app) deleteSession(w http.ResponseWriter, r *http.Request, owner string
 		return
 	}
 	defer a.busy.Delete(sid)
-	res, e := a.db.Exec(`DELETE FROM sessions WHERE id=? AND (?='' OR owner=?)`, sid, owner, owner)
-	changed(w, res, e)
+	if boundSession(r) != "" {
+		fail(w, 403, "session_fixed", "A bound key cannot delete sessions")
+		return
+	}
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	defer tx.Rollback()
+	var linked bool
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM key_bindings WHERE session=s.id) FROM sessions s WHERE id=? AND (?='' OR owner=?)", sid, owner, owner).Scan(&linked)
+	if errors.Is(err, sql.ErrNoRows) {
+		fail(w, 404, "not_found", "Session not found")
+		return
+	}
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	if linked {
+		fail(w, 409, "session_bound", "Unbind active keys before removing this session")
+		return
+	}
+	res, err := tx.Exec("DELETE FROM sessions WHERE id=?", sid)
+	if err == nil {
+		err = tx.Commit()
+	}
+	changed(w, res, err)
 }
 func (a *app) logs(w http.ResponseWriter, r *http.Request, _ string) {
 	s := r.URL.Query().Get("session")
@@ -383,7 +453,16 @@ func (a *app) models(w http.ResponseWriter, r *http.Request, _ string) {
 }
 func upstream(w http.ResponseWriter, ctx context.Context, e error) {
 	status := errorStatus(ctx, e)
-	log.Printf("CLI request failed: %v", e)
+	if status == 499 {
+		fail(w, status, "request_canceled", "Request canceled before completion")
+		return
+	}
+	var provider *imageProviderError
+	if errors.As(e, &provider) {
+		fail(w, status, "image_provider_error", provider.Error())
+		return
+	}
+	log.Printf("Upstream request failed: %v", e)
 	if errors.Is(e, errNoImage) {
 		fail(w, 502, "image_unavailable", "Codex did not return an image. Check that your login, model and quota support the built-in image tool.")
 		return

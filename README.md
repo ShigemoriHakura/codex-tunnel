@@ -1,4 +1,4 @@
-# Desk Tunnel
+# Codex Tunnel
 
 单实例、自托管的 **Go + Codex CLI API 网关**，附中英文 Web 控制台。适合给受信任的内部客户端提供统一入口，不是匿名公共服务，也不是 OpenAI API 的完整替代。每个 API 密钥拥有独立会话，但共用管理员配置的上游账户、额度与并发池。
 
@@ -40,31 +40,46 @@ TLS_HEALTH_SERVER_NAME=替换为证书SAN包含的公网IP或域名
 
 执行 `docker compose config -q && docker compose up --build -d --wait`。仅允许所需来源访问此 TCP 端口。公网模式只监听一个 HTTPS 端口，无 HTTP 跳转；容器内外端口相同，范围 49152–65535。客户端使用 `https://主机:端口/` 和 `https://主机:端口/v1`。自签证书应通过受信任渠道核对 SHA-256 指纹并显式信任，不要关闭证书校验；换证后 `docker compose up -d --force-recreate`。
 
+### 多层反向代理下的流式响应
+
+网关会在 SSE 响应中发送 `X-Accel-Buffering: no`。客户端与网关之间有多层反向代理时，在需要继续转发该响应头的 Nginx 或 OpenResty 的 `server` 或 `location` 中添加以下指令，检查配置后重新加载。下一层代理收到该响应头后，就能及时向客户端转发生图保活消息和预览。
+
+```nginx
+proxy_pass_header X-Accel-Buffering;
+```
+
 ## 面板与会话
 
 登录页和面板页眉的语言选择器支持简体中文与英语。控制台默认跟随系统配色，在页眉可切换浅色或深色。手机上通过顶部菜单切换页面。首次访问按浏览器语言偏好选择，不匹配时使用简体中文；手动选择保存在当前浏览器。切换不刷新页面，不翻译用户消息、模型 ID 或上游原始数据。新增语言时，在 `src/web/locales/` 添加同键字典并在 `src/web/i18n.mjs` 注册。
 
 | 页面 | 可执行操作 |
 | --- | --- |
-| 运行概览 | 查看请求与 Token 计数、最近 24 次请求的耗时、最近活动和客户端接入地址 |
-| 访问密钥 | 创建、分页查看、撤销；数据库只保存随机密钥的 SHA-256 摘要 |
+| 运行概览 | 按时段、请求类型和模型切换五项指标，查看请求量与平均耗时、计量覆盖率、诊断队列和最近活动 |
+| 访问密钥 | 创建、查看、撤销或删除密钥，选择已有会话或新建会话并绑定 |
 | 会话管理 | 查看归属、模型、最近活动；按页读取对话历史、查看该会话的请求或移除绑定 |
 | 请求日志 | 查看入站请求与出站 Codex CLI 调用，搜索、筛选、分页、导出本页或复制单条详情。在采集设置中控制范围、容量、正文预览与暂停 |
 | 用量统计 | 选择最近 1 小时至 90 天或全部历史，以 5 分钟、小时或天为粒度查看 Token、请求数和缓存命中率趋势。可按模型和客户端密钥查看明细 |
 | 错误中心 | 按来源、错误码和状态归并失败事件，查看首次及最近发生时间、请求 ID、路径、模型和未读数，可标记已读或清空 |
-| 模型与配额 | 查看网关 CLI 登录身份、套餐、限额窗口和重置卡数量及明细，刷新模型清单 |
+| 模型与配额 | 查看网关 CLI 登录身份、套餐、限额窗口和重置卡明细，手动使用重置卡，刷新模型清单 |
 | CLI 维护 | 检查当前版本及 npm 官方稳定版、验证安装后切换、回退到内置版本 |
 | 接口调试 | 测量网关进程内存，或用客户端密钥新建会话、发送文本和生成图片 |
+| 站点设置 | 保存公开域名和 URL 子目录，预览控制台地址与客户端 Base URL |
 
-请求日志默认仅采集推理元数据，保留最近 2,000 条，可设为 1 至 10,000 条。切换到全部业务接口可排查模型列表、账户、会话等调用。出站记录代表网关交给 CLI 的调用，同次请求的两个方向共用请求 ID。正文预览默认关闭。开启后会保存推理文本，每份预览最多约 8 KiB，对话中可能含有敏感信息。鉴权头、管理接口正文及图片字节均省略。
+在“站点设置”填写域名（例如 `https://gateway.example.com`）和访问子目录（例如 `/tools/codex`），保存后控制台入口为 `https://gateway.example.com/tools/codex/`，客户端 Base URL 为 `https://gateway.example.com/tools/codex/v1`。空域名使用当前来源，空目录使用根路径。配置写入 SQLite 并即时生效。当前主机的根入口继续可用，方便从错误配置恢复。域名需解析到网关或反向代理，代理应保留完整请求路径。HTTPS 使用该域名对应的证书。跨域名首次访问需单独登录。
 
-用量统计以每次执行的推理为单位。暂停采集、清空诊断日志或调整保留条数后，累计用量仍可查询。旧记录原有的请求数及用量会计入趋势，CLI 未报告的字段显示“未报告”。首个文本 Token 耗时以网关实际收到文本增量的时间计算，速度仅统计输出至少 100 Tokens 的轮次。缓存命中率以有缓存计量的输入 Tokens 为分母。生图按成功和失败计数，并显示 CLI 报告的整轮用量。美元费用按已知模型的标准短上下文文本单价折算，面板列出可估价的请求数。订阅账单以提供方为准。[OpenAI API 价格表](https://developers.openai.com/api/docs/pricing)
+请求日志默认仅采集推理元数据，保留最近 2,000 条，可设为 1 至 10,000 条。切换到全部业务接口可排查模型列表、账户、会话等调用。出站记录包含网关交给 CLI 的调用和发往当前 Codex 工作区 Images 接口的请求，同次请求的两个方向共用请求 ID。正文预览默认关闭。开启后会保存推理文本，每份预览最多约 8 KiB，对话中可能含有敏感信息。鉴权头、管理接口正文及图片字节均省略。
 
-“模型与配额”读取网关所用 Codex 配置目录中的登录状态。Docker 部署请在上方的 `gateway` 容器内完成设备登录，再点击“刷新账户和配额”。限额和重置卡通过只读 RPC 查询。上游可能只提供可用数量，或完全省略重置卡信息；面板会区分“可用 0 张”和“上游未报告”。
+用量统计以每次执行的推理为单位。暂停采集、清空诊断日志或调整保留条数后，累计用量仍可查询。旧记录原有的请求数及用量会计入趋势，CLI 未报告的字段显示“未报告”。首个文本 Token 耗时以网关实际收到文本增量的时间计算，速度仅统计输出至少 100 Tokens 的轮次。缓存命中率以有缓存计量的输入 Tokens 为分母。生图按成功和失败计数，并显示 CLI 或 Images 接口报告的用量。美元费用按已知模型的标准短上下文文本单价折算，面板列出可估价的请求数。订阅账单以提供方为准。[OpenAI API 价格表](https://developers.openai.com/api/docs/pricing)
+
+“模型与配额”读取网关所用 Codex 配置目录中的登录状态。Docker 部署请在上方的 `gateway` 容器内完成设备登录，再点击“刷新账户和配额”。查看和刷新通过只读 RPC 查询。点击某张重置卡右侧的“使用”，在弹窗中核对账户和卡片，再点“确认使用”。上游只报告数量时，列表显示一行汇总，弹窗会说明由上游分配一张可用卡。操作后页面会显示兑换结果，并刷新额度和卡数。
 
 “接口调试 → 测试内存占用”通过管理员接口 `GET /admin/memory` 即时采样 Go 堆分配量。Linux 还会显示网关进程当前和启动以来的峰值常驻内存（MiB）。查看包含 CLI 子进程的整个容器用量可运行 `docker compose stats --no-stream gateway`。内存采样无需客户端密钥，不启动推理。
 
-**默认无状态**：每次创建临时 Codex 线程，可以传完整的文本消息序列。**显式续聊**：先创建网关会话，再带 `X-Session-ID`，只传本轮的新用户消息。不要重复发送整段历史。会话与密钥绑定，首次运行后固定模型；重启后通过 SQLite 中的绑定和 Codex 持久线程继续。并发写同一会话返回 `409`；并发槽满返回 `429`。生成中断可能已经改变上游会话，重试前可先读取历史，接口不保证幂等。
+未绑定的密钥默认使用临时线程，可发送完整消息序列。要显式续聊，先创建会话，随后每次带上 `X-Session-ID`，只发送本轮用户消息。
+
+在“访问密钥 → 会话绑定”选择已有会话，或新建并绑定。该密钥的聊天请求会自动进入固定会话，可省略 `X-Session-ID`。指定其他会话会返回 `403`。客户端若每次重发完整对话，网关会在首次请求中传入这些上下文，之后只追加最后一条用户消息。绑定已有会话会授权该密钥读取并继续该会话，选择“未绑定”可解除授权。撤销或删除密钥即解除固定绑定并终止后续鉴权。删除还会清除凭据摘要并从列表移除密钥，原会话、用量记录和归属仍可在管理员面板查看。
+
+会话首次运行后固定模型，重启后可继续。并发写同一会话返回 `409`；并发槽满返回 `429`。生成中断可能已经改变上游会话，重试前可先读取历史，接口不保证幂等。
 
 ## 客户端 API
 
@@ -78,7 +93,7 @@ curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/models"
 curl -fsS -H "Authorization: Bearer $DT_KEY" -H 'Content-Type: application/json' \
   -d '{"name":"产品讨论"}' "$BASE/v1/sessions"
 
-# 2. 在该会话发送消息；删除 X-Session-ID 行即可改用无状态模式
+# 2. 在该会话发送消息；未绑定密钥省略该请求头时进入无状态模式
 curl -N -H "Authorization: Bearer $DT_KEY" -H 'Content-Type: application/json' \
   -H "X-Session-ID: $SID" \
   -d '{"messages":[{"role":"user","content":"给项目起一个简短的名字"}],"stream":true,"stream_options":{"include_usage":true}}' \
@@ -86,7 +101,7 @@ curl -N -H "Authorization: Bearer $DT_KEY" -H 'Content-Type: application/json' \
 
 # 3. 生图（返回 data[0].b64_json；不会公开托管图片）
 curl -fsS -H "Authorization: Bearer $DT_KEY" -H 'Content-Type: application/json' \
-  -d '{"prompt":"画一只墨绿色的纸鹤","n":1,"response_format":"b64_json"}' \
+  -d '{"model":"gpt-image-2.5-sunburst","prompt":"画一只墨绿色的纸鹤","size":"1024x1024","quality":"high","n":1,"response_format":"b64_json","output_format":"png"}' \
   "$BASE/v1/images/generations" > image-response.json
 
 curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
@@ -96,15 +111,21 @@ curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
 | --- | --- |
 | `GET /healthz` | 网关存活探针，不代表上游已登录 |
 | `GET /v1/models` | 从 CLI `model/list` 分页拉取，不硬编码模型 |
-| `POST /v1/chat/completions` | 文本与 SSE；支持 `model`、`messages`、`stream`、`stream_options.include_usage` |
-| `POST /v1/images/generations` | 单图 `b64_json`；可选 `model` 指调度生图工具的 **Codex 模型**，不是图片引擎 ID |
+| `POST /v1/chat/completions` | 文本、图片输入与 SSE；支持 `model`、`messages`、`stream`、`stream_options.include_usage` |
+| `POST /v1/images/generations` | 返回一张 Base64 图片。`output_format` 支持 `png`（默认）、`jpeg`、`webp`。JPEG 和 WebP 可设 `output_compression`（0–100）；`model` 可使用 `gpt-image-2.5-sunburst` 等图片模型，直接向当前 Codex 登录工作区的 Images 接口提交模型名、尺寸、质量、背景与输出选项。传入 Codex 聊天模型或省略模型名时，保留 CLI 内置工具模式（尺寸和质量为 `auto`） 设置 `stream: true` 使用 SSE。生图等待期间每 3 秒发送并刷新一条 SSE 保活注释，客户端只需处理图片事件。可用 `partial_images` 请求 0–3 张预览；上游只返回整图时，客户端会收到一个 `image_generation.completed` 事件。 |
 | `POST /v1/sessions` | `name`、`model` 都可省略，发送 `{}` 即可 |
 | `GET /v1/sessions` | 本密钥会话，`?offset=100` 翻页，每页最多 100 条 |
 | `GET /v1/sessions/{id}/history` | 从新到旧读取对话轮次，每页 10 轮，用 `next_cursor` 作为下一页的 `cursor` |
 | `DELETE /v1/sessions/{id}` | 解除绑定；不承诺物理擦除 CLI 历史或备份 |
 | `GET /v1/usage` | 当前密钥已执行的推理请求汇总（含已报告用量的失败请求） |
 
-兼容范围：消息 `content` 为字符串，最后一条为 `user`。无状态多条消息会作为带角色的对话上下文交给 CLI，非逐字段透传。暂不支持 Responses API、客户端工具调用、视觉输入、`temperature`、批量生图或图片编辑。未知请求字段返回 `400`。单次请求体上限 1 MiB，推理超时 10 分钟。上游无计量时返回 `usage: null`，不将其伪装成零消耗。网关累计值是观测值，不含其他应用的调用，不是账单，也不能用来推算订阅余额。
+消息 `content` 支持文本字符串或内容数组，最后一条消息的角色须为 `user`。网关接受客户端回传的 `reasoning_content` 字符串或 `null`，只把可见消息内容送入模型。仅含推理文本的历史助手消息会被跳过。
+
+```json
+{"messages":[{"role":"user","content":[{"type":"text","text":"图里有什么？"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPoKDcGAAK9ATNQgxqrAAAAAElFTkSuQmCC"}}]}]}
+```
+
+用户图片通过 Base64 data URL 传入，支持 PNG、JPEG、WebP、GIF。使用图片链接的客户端需先读取图片并转换为 data URL。可选的 `image_url.detail` 支持 `auto`、`high` 和 `original`。图片识别需使用支持视觉输入的上游模型。聊天请求上限为 24 MiB，按 Base64 编码后的整个 JSON 请求体计算；其他 JSON 接口上限为 1 MiB。超出上限返回 `413`。无状态的多条消息会作为带角色的上下文交给 CLI。客户端工具调用、Responses API、`temperature`、批量生图和图片编辑仍不在兼容范围内。未知请求字段返回 `400`。推理超时 10 分钟。上游无计量时返回 `usage: null`，不将其伪装成零消耗。网关累计值是观测值，不含其他应用的调用，不是账单，也不能用来推算订阅余额。
 
 ## 部署、更新与安全
 
@@ -116,6 +137,12 @@ curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
 - `502` 优先检查 `docker compose logs gateway`、CLI 登录状态、所选模型及账户权限；`504` 表示请求上下文取消或超时。用量只统计已进入执行的推理请求。鉴权、校验或繁忙拒绝可在错误中心及相应采集范围的请求日志查看。
 
 ## 本地开发与验证
+
+概览布局使用本地编译的 Tailwind 工具类。Go 直接嵌入生成的 CSS，浏览器无需访问 CDN。修改界面中的工具类后，在仓库根目录执行以下命令生成样式。
+
+```sh
+npx --yes tailwindcss@3.4.17 -i src/tailwind.css --content 'src/web/**/*.{html,js,mjs}' -o src/web/utilities.css --minify
+```
 
 Go 服务与测试位于 `src/`，嵌入式管理面板位于 `src/web/`。以下命令均从仓库根目录执行。
 

@@ -371,8 +371,18 @@ func errorStatus(ctx context.Context, err error) int {
 	if err == nil {
 		return 200
 	}
-	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return 499
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 		return 504
+	}
+	var provider *imageProviderError
+	if errors.As(err, &provider) {
+		switch provider.status {
+		case 400, 403, 404, 409, 413, 422, 429, 503:
+			return provider.status
+		}
 	}
 	return 502
 }
