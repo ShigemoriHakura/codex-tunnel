@@ -260,13 +260,7 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 		start := time.Now()
 		resp, e := client.Do(req)
 		if e == nil {
-			if resp.StatusCode != 200 {
-				e = responseRejection(resp)
-			} else if !isEventStream(resp.Header.Get("Content-Type")) {
-				e = errors.New("expected a Responses event stream")
-			} else {
-				e = out.read(resp.Body)
-			}
+			e = out.read(resp)
 			resp.Body.Close()
 		}
 		recordHop(ctx, "POST", req.URL.Path, start, e)

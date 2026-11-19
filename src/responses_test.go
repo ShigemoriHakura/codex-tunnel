@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,19 +26,36 @@ func TestResponsesValidation(t *testing.T) {
 	hit(t, a, "POST", "/v1/responses", "bad", `{}`, "", 401)
 }
 func TestResponsesStreamTermination(t *testing.T) {
-	for _, tc := range []struct {
-		wire string
-		ok   bool
-	}{
-		{"data: {\"type\":\"response.incomplete\",\r\ndata: \"response\":{\"output\":[],\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\r\n\r\n", true},
-		{"data: {\"type\":\"response.created\",\"response\":{}}\n\n", false},
-		{"data: [DONE]\n\n", false},
-		{"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\"}}}\n\n", false},
+	const completed = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n"
+	for _, tc := range []struct{ name, media, wire, code string }{
+		{"declared SSE", "text/event-stream; charset=utf-8", "data: {\"type\":\"response.incomplete\",\r\ndata: \"response\":{\"output\":[],\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\r\n\r\n", ""},
+		{"missing workspace header", "", completed, ""},
+		{"proxy default", "text/plain; charset=utf-8", "\xef\xbb\xbf\r\n: keep-alive\r\n\r\n" + completed, ""},
+		{"binary default", "application/octet-stream", completed, ""},
+		{"HTML page without header", "", "<!DOCTYPE html>\n", "responses_protocol_error"},
+		{"JSON instead of SSE", "application/json", `{"type":"response.completed"}`, "responses_protocol_error"},
+		{"truncated stream", "", "data: {\"type\":\"response.created\",\"response\":{}}\n\n", "responses_stream_incomplete"},
+		{"missing response", "text/event-stream", "data: [DONE]\n\n", "responses_protocol_error"},
+		{"upstream rejection", "", "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\"}}}\n\n", "rate_limit_exceeded"},
 	} {
-		out := responseStream{reply: &generationResponse{w: httptest.NewRecorder()}, id: "resp_test"}
-		if err := out.read(strings.NewReader(tc.wire)); (err == nil) != tc.ok {
-			t.Fatal(err, tc.wire)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.wire))}
+			if tc.media != "" {
+				resp.Header.Set("Content-Type", tc.media)
+			}
+			out := responseStream{reply: &generationResponse{w: httptest.NewRecorder()}, id: "resp_test"}
+			err := out.read(resp)
+			if tc.code == "" {
+				if err != nil || out.terminal == nil {
+					t.Fatalf("no terminal event: %v", err)
+				}
+				return
+			}
+			var failure *responsesError
+			if !errors.As(err, &failure) || failure.code != tc.code {
+				t.Fatalf("want %s, got %v", tc.code, err)
+			}
+		})
 	}
 }
 
@@ -124,7 +142,8 @@ func TestResponsesCLI(t *testing.T) {
 		}
 		event("response.output_item.done", M{"output_index": 0, "item": item})
 		event("response.completed", M{"response": M{"id": "upstream", "model": b.Model, "usage": M{"input_tokens": 17, "output_tokens": 101, "total_tokens": 118, "input_tokens_details": M{"cached_tokens": 4}, "output_tokens_details": M{"reasoning_tokens": 2}}}})
-		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(s.String())), Request: r}, nil
+		// Workspace HTTP/2 responses can omit Content-Type on a successful stream.
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(s.String())), Request: r}, nil
 	})
 	key, kid := newKey(t, a)
 	other, _ := newKey(t, a)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -26,12 +27,44 @@ type responseStream struct {
 	chatDelta           func(string) error
 }
 
-func (s *responseStream) read(r io.Reader) error {
-	scan := bufio.NewScanner(r)
+func responseProtocolError(message string) error {
+	return &responsesError{http.StatusBadGateway, "responses_protocol_error", message}
+}
+
+func (s *responseStream) read(resp *http.Response) error {
+	if resp.StatusCode != http.StatusOK {
+		return responseRejection(resp)
+	}
+	// The workspace can send real SSE over HTTP/2 without a Content-Type.
+	// Inspect the first field incrementally when the media type is unspecified.
+	media, _, _ := strings.Cut(resp.Header.Get("Content-Type"), ";")
+	sniff := false
+	switch strings.ToLower(strings.TrimSpace(media)) {
+	case "text/event-stream":
+	case "", "text/plain", "application/octet-stream":
+		sniff = true
+	default:
+		return responseProtocolError("Responses upstream returned HTTP 200 with a non-SSE Content-Type")
+	}
+	scan := bufio.NewScanner(resp.Body)
 	scan.Buffer(make([]byte, 4096), chatBodyLimit)
 	var data bytes.Buffer
+	firstLine := true
 	for scan.Scan() {
 		line := scan.Bytes()
+		if firstLine {
+			line = bytes.TrimPrefix(line, []byte("\xef\xbb\xbf"))
+			firstLine = false
+		}
+		if sniff && len(line) > 0 {
+			field, _, _ := bytes.Cut(line, []byte(":"))
+			switch string(field) {
+			case "", "event", "data", "id", "retry":
+				sniff = false
+			default:
+				return responseProtocolError("Responses upstream returned HTTP 200 without recognizable SSE framing")
+			}
+		}
 		if len(line) == 0 {
 			if data.Len() == 0 {
 				continue
@@ -43,7 +76,7 @@ func (s *responseStream) read(r io.Reader) error {
 			}
 		} else if value, ok := bytes.CutPrefix(line, []byte("data:")); ok {
 			if data.Len()+len(value)+1 > chatBodyLimit {
-				return errors.New("oversized Responses event")
+				return responseProtocolError("oversized Responses event")
 			}
 			if data.Len() > 0 {
 				data.WriteByte('\n')
@@ -51,22 +84,22 @@ func (s *responseStream) read(r io.Reader) error {
 			data.Write(bytes.TrimPrefix(value, []byte(" ")))
 		}
 	}
-	if err := scan.Err(); err != nil {
-		return err
+	if err := scan.Err(); err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return responseProtocolError("Responses upstream stream could not be read within the event size limit or the connection failed")
 	}
-	return io.ErrUnexpectedEOF
+	return &responsesError{http.StatusBadGateway, "responses_stream_incomplete", "Responses upstream closed the stream before a terminal event"}
 }
 func (s *responseStream) event(data []byte) (bool, error) {
 	var e responseFields
 	var typ string
 	if json.Unmarshal(data, &e) != nil || json.Unmarshal(e["type"], &typ) != nil || !imageErrorCode.MatchString(typ) {
-		return false, errors.New("invalid Responses event")
+		return false, responseProtocolError("invalid Responses event")
 	}
 	// Gateways own response IDs; use the same ID in every envelope.
 	var obj responseFields
 	if raw := e["response"]; len(raw) > 0 {
 		if json.Unmarshal(raw, &obj) != nil || obj == nil {
-			return false, errors.New("invalid response object")
+			return false, responseProtocolError("invalid response object")
 		}
 		obj["id"] = rawJSON(s.id)
 		obj["object"] = rawJSON("response")
@@ -130,26 +163,26 @@ func (s *responseStream) event(data []byte) (bool, error) {
 		raw := e["item"]
 		idx := len(s.items)
 		if v, ok := e["output_index"]; ok && json.Unmarshal(v, &idx) != nil {
-			return false, errors.New("invalid output index")
+			return false, responseProtocolError("invalid output index")
 		}
 		if idx < 0 || idx >= 4096 || len(raw) == 0 || raw[0] != '{' || s.size+len(raw) > chatBodyLimit {
-			return false, errors.New("invalid or oversized Responses output")
+			return false, responseProtocolError("invalid or oversized Responses output")
 		}
 		for len(s.items) <= idx {
 			s.items = append(s.items, nil)
 		}
 		if s.items[idx] != nil {
-			return false, errors.New("duplicate Responses output index")
+			return false, responseProtocolError("duplicate Responses output index")
 		}
 		s.items[idx] = raw
 		s.size += len(raw)
 	case "response.completed", "response.incomplete":
 		if obj == nil {
-			return false, errors.New("missing terminal response")
+			return false, responseProtocolError("missing terminal response")
 		}
 		var output responseItems
 		if v := obj["output"]; len(v) > 0 && json.Unmarshal(v, &output) != nil {
-			return false, errors.New("invalid terminal output")
+			return false, responseProtocolError("invalid terminal output")
 		}
 		if len(output) == 0 {
 			output = s.items
@@ -159,7 +192,7 @@ func (s *responseStream) event(data []byte) (bool, error) {
 		}
 		for _, i := range output {
 			if len(i) == 0 {
-				return false, errors.New("missing completed output item")
+				return false, responseProtocolError("missing completed output item")
 			}
 		}
 		s.items = output
