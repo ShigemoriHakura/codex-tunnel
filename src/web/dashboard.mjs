@@ -1,4 +1,5 @@
 import { msg, text, number, percent, dateTime } from "./i18n.mjs";
+import { metric } from "./monitor.mjs";
 import { copyAddress, publicURLs } from "./site.mjs";
 
 const surface =
@@ -386,6 +387,11 @@ export async function dashboardView(root, ui, signal) {
         msg("board.reasoning", { n: value(s.reasoning) }),
       ],
       [
+        "trend.avgTps",
+        metric(s.avg_tps, "tok/s"),
+        msg("board.tpsSamples", { n: number(s.tps_samples) }),
+      ],
+      [
         "monitor.success",
         s.requests ? percent(100 * (1 - s.errors / s.requests)) : "—",
         msg("board.failedCount", { n: number(s.errors) }),
@@ -399,13 +405,13 @@ export async function dashboardView(root, ui, signal) {
     const stripKpi = el(
       "div",
       undefined,
-      "grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-solid border-[var(--line)] bg-[var(--line)] sm:grid-cols-3 xl:grid-cols-5",
+      "grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-solid border-[var(--line)] bg-[var(--line)] sm:grid-cols-3 xl:grid-cols-6",
     );
     for (const [label, v, hint] of metrics) {
       const k = el(
         "div",
         undefined,
-        "grid min-h-[110px] min-w-0 last:col-span-2 sm:last:col-span-1 content-center gap-1 bg-[var(--surface)] p-4",
+        "grid min-h-[110px] min-w-0 content-center gap-1 bg-[var(--surface)] p-4",
       );
       k.append(
         el("small", msg(label), caption),

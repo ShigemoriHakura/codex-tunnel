@@ -91,7 +91,7 @@ function pageMetrics(records) {
   };
   return [
     ["monitor.ttft", metric(sum("ttft_ms", true), "ms")],
-    ["monitor.speed", metric(sum("speed", true), "tok/s")],
+    ["trend.avgTps", metric(sum("tps", true), "tok/s")],
     ["monitor.latency", metric(sum("latency_ms", true), "ms")],
     [
       "monitor.success",
@@ -165,7 +165,7 @@ function drawDetail(root, row, { el, button }) {
       ],
       ["col.latency", metric(row.latency_ms, "ms")],
       ["monitor.ttft", metric(row.ttft_ms, "ms")],
-      ["monitor.speed", metric(row.speed, "tok/s")],
+      ["monitor.tps", metric(row.tps, "tok/s")],
       ["monitor.cost", metric(row.cost, "$")],
       ["usage.input", metric(row.input)],
       ["usage.output", metric(row.output)],
@@ -399,7 +399,7 @@ export async function logsView(root, ui, session, signal) {
           "monitor.path",
           "col.model",
           "monitor.ttft",
-          "monitor.speed",
+          "monitor.tps",
           "monitor.cost",
           "col.latency",
           "col.actions",
@@ -413,7 +413,7 @@ export async function logsView(root, ui, session, signal) {
           (r) => r.method + " " + r.path,
           "model",
           (r) => metric(r.ttft_ms, "ms"),
-          (r) => metric(r.speed, "tok/s"),
+          (r) => metric(r.tps, "tok/s"),
           (r) => metric(r.cost, "$"),
           (r) => metric(r.latency_ms, "ms"),
           (r) => button(msg("monitor.detail"), () => select(r)),

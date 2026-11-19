@@ -14,7 +14,7 @@ const tokenSeries = [
   ["output", "usage.output"],
   ["cached", "monitor.cached"],
 ];
-function plot(root, data, series, label, ui, signal) {
+function plot(root, data, series, label, ui, signal, unit = "") {
   const { el } = ui;
   const wrap = el("div", undefined, "trend-chart"),
     legends = el("div", undefined, "chart-legend");
@@ -35,14 +35,15 @@ function plot(root, data, series, label, ui, signal) {
   const pts = new Map(data.buckets.map((v) => [v.bucket, v]));
   function sample(index, key) {
     const p = pts.get(first + index * data.step);
-    if (!p) return key === "hit_rate" ? null : 0;
+    if (!p) return unit ? null : 0;
     if ((key === "input" || key === "output") && p.requests === p.unmetered)
       return null;
     return p[key];
   }
-  let index = slots - 1;
+  const lastSample = unit === "tok/s" && data.buckets.findLast((b) => b.tps_samples > 0);
+  let index = lastSample ? (lastSample.bucket - first) / data.step : slots - 1;
   const max =
-    series[0][0] === "hit_rate"
+    unit === "%"
       ? 100
       : Math.max(
           1,
@@ -81,7 +82,7 @@ function plot(root, data, series, label, ui, signal) {
       c.stroke();
       c.fillStyle = css.color;
       const tick =
-        series[0][0] === "hit_rate"
+        unit === "%"
           ? Math.round(v) + "%"
           : new Intl.NumberFormat(document.documentElement.lang, {
               notation: "compact",
@@ -162,17 +163,12 @@ function plot(root, data, series, label, ui, signal) {
     c.lineTo(x(index), height - bottom);
     c.stroke();
     const stamp = first + index * data.step;
-    const description =
-      dateTime(stamp)() +
-      " · " +
-      series
-        .map(
-          ([k, title]) =>
-            text(title) +
-            " " +
-            metric(sample(index, k), k === "hit_rate" ? "%" : "")(),
-        )
-        .join(" / ");
+    const values = series.map(
+      ([key, title]) => text(title) + " " + metric(sample(index, key), unit)(),
+    );
+    if (unit === "tok/s")
+      values.push(text("board.tpsSamples", { n: number(pts.get(stamp)?.tps_samples ?? 0) }));
+    const description = dateTime(stamp)() + " · " + values.join(" / ");
     readout.textContent = description;
     canvas.setAttribute("aria-label", text(label) + " · " + description);
   }
@@ -304,6 +300,9 @@ export async function usageView(root, ui, signal) {
           ],
           ["monitor.cached", metric(s.cached)],
           ["monitor.reasoning", metric(s.reasoning)],
+          ["trend.avgTps", metric(s.avg_tps, "tok/s")],
+          ["trend.peakTps", metric(s.peak_tps, "tok/s")],
+          ["trend.tpsSamples", metric(s.tps_samples)],
           ["trend.rangeHit", metric(s.hit_rate, "%")],
           ["trend.lifeHit", metric(data.lifetime.hit_rate, "%")],
           ["monitor.cost", metric(s.cost, "$")],
@@ -335,6 +334,7 @@ export async function usageView(root, ui, signal) {
             unknown: number(s.unmetered),
           }),
         ),
+        el("p", msg("trend.tpsHint"), "hint"),
         el("p", msg("trend.priceHint"), "hint"),
       );
       const [chart] = panel(results, msg("trend.history"));
@@ -365,7 +365,18 @@ export async function usageView(root, ui, signal) {
           "trend.cacheHistory",
           ui,
           chartLife.signal,
+          "%",
         );
+        if (s.tps_samples > 0)
+          plot(
+            chart,
+            data,
+            [["avg_tps", "trend.avgTps"], ["peak_tps", "trend.peakTps"]],
+            "trend.tpsHistory",
+            ui,
+            chartLife.signal,
+            "tok/s",
+          );
       } else chart.append(el("p", msg("common.empty"), "empty"));
       for (const [title, entries, byModel] of [
         ["trend.models", data.models, true],
@@ -380,6 +391,9 @@ export async function usageView(root, ui, signal) {
             msg("usage.input"),
             msg("usage.output"),
             msg("monitor.cached"),
+            msg("trend.avgTps"),
+            msg("trend.peakTps"),
+            msg("trend.tpsSamples"),
             msg("trend.errors"),
             msg("monitor.cost"),
           ],
@@ -401,6 +415,9 @@ export async function usageView(root, ui, signal) {
             (r) => metric(r.unmetered === r.requests ? null : r.input),
             (r) => metric(r.unmetered === r.requests ? null : r.output),
             (r) => metric(r.cached),
+            (r) => metric(r.avg_tps, "tok/s"),
+            (r) => metric(r.peak_tps, "tok/s"),
+            "tps_samples",
             "errors",
             (r) => metric(r.cost, "$"),
           ],

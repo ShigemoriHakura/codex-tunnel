@@ -273,7 +273,7 @@ func (a *app) logSettings(w http.ResponseWriter, r *http.Request, _ string) {
 }
 
 const eventJoin = ` FROM log_events e LEFT JOIN keys k ON k.id=e.owner LEFT JOIN requests r ON r.id=e.request_id LEFT JOIN request_metrics m ON m.request_id=r.id `
-const eventFields = `e.seq,e.request_id,e.direction,e.created,e.method,e.path,e.status,e.latency_ms,e.owner,k.name AS key_name,e.session,e.model,e.kind,e.stream,e.error_code,e.message,r.metered,CASE WHEN r.metered THEN r.input END input,CASE WHEN r.metered THEN r.output END output,m.cached,m.reasoning,m.ttft_ms,m.speed,m.cost,m.account`
+const eventFields = `e.seq,e.request_id,e.direction,e.created,e.method,e.path,e.status,e.latency_ms,e.owner,k.name AS key_name,e.session,e.model,e.kind,e.stream,e.error_code,e.message,r.metered,CASE WHEN r.metered THEN r.input END input,CASE WHEN r.metered THEN r.output END output,m.cached,m.reasoning,m.ttft_ms,m.speed,m.cost,m.account,` + requestTPS + " tps"
 
 func (a *app) diagnosticLogs(w http.ResponseWriter, r *http.Request, _ string) {
 	if r.Method == "DELETE" {

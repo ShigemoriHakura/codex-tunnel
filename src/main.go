@@ -431,11 +431,11 @@ func (a *app) deleteSession(w http.ResponseWriter, r *http.Request, owner string
 }
 func (a *app) logs(w http.ResponseWriter, r *http.Request, _ string) {
 	s := r.URL.Query().Get("session")
-	items, e := rows(a.db, `SELECT requests.*,keys.name key_name FROM requests LEFT JOIN keys ON owner=keys.id WHERE (?='' OR session=?) ORDER BY requests.created DESC,requests.rowid DESC LIMIT 100 OFFSET ?`, s, s, offset(r))
+	items, e := rows(a.db, "SELECT "+requestFields+ledger+`WHERE (?='' OR r.session=?) ORDER BY r.created DESC,r.rowid DESC LIMIT 100 OFFSET ?`, s, s, offset(r))
 	listOut(w, items, e)
 }
 func (a *app) usage(w http.ResponseWriter, r *http.Request, owner string) {
-	items, e := rows(a.db, `SELECT COUNT(*) requests,COALESCE(SUM(status>=400),0) errors,COALESCE(SUM(input),0) input_tokens,COALESCE(SUM(output),0) output_tokens,COALESCE(SUM(metered=0),0) unmetered_requests,COALESCE(SUM(kind='image' AND status=200),0) images FROM requests WHERE (?='' OR owner=?)`, owner, owner)
+	items, e := rows(a.db, `SELECT COUNT(*) requests,COALESCE(SUM(status>=400),0) errors,COALESCE(SUM(input),0) input_tokens,COALESCE(SUM(output),0) output_tokens,COALESCE(SUM(metered=0),0) unmetered_requests,COALESCE(SUM(kind='image' AND status=200),0) images,`+tpsStats+ledger+`WHERE (?='' OR r.owner=?)`, owner, owner)
 	if e != nil {
 		internal(w, e)
 		return

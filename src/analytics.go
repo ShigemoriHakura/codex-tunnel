@@ -65,13 +65,19 @@ func estimateCost(model, kind string, used counts) *float64 {
 }
 
 const ledger = ` FROM requests r LEFT JOIN request_metrics m ON m.request_id=r.id LEFT JOIN keys k ON k.id=r.owner `
+
+// Count each successful metered chat once, using the output speed recorded for
+// that request. Older ledgers and short replies may have no speed sample.
+const requestTPS = `CASE WHEN r.kind='chat' AND r.status BETWEEN 200 AND 299 AND r.metered=1 AND r.output>=100 AND m.speed>0 THEN m.speed END`
+const tpsStats = "AVG(" + requestTPS + ") avg_tps, MAX(" + requestTPS + ") peak_tps, COUNT(" + requestTPS + ") tps_samples"
+const requestFields = "r.*,k.name key_name," + requestTPS + " tps"
 const totals = `COUNT(*) requests,COUNT(CASE WHEN r.status>=400 THEN 1 END) errors,
 COUNT(CASE WHEN r.metered=0 THEN 1 END) unmetered,COALESCE(SUM(r.input),0) input,COALESCE(SUM(r.output),0) output,
 SUM(m.cached) cached,SUM(m.reasoning) reasoning,100.0*SUM(m.cached)/NULLIF(SUM(CASE WHEN m.cached IS NOT NULL THEN r.input END),0) hit_rate,
 SUM(m.cost) cost,COUNT(m.cost) priced,COUNT(DISTINCT r.owner) active_keys,COUNT(DISTINCT m.account) active_accounts,
 COUNT(CASE WHEN r.kind='image' AND r.status<400 THEN 1 END) image_ok,COUNT(CASE WHEN r.kind='image' AND r.status>=400 THEN 1 END) image_failed,
 SUM(CASE WHEN r.kind='image' AND r.metered THEN r.input END) image_turn_input,SUM(CASE WHEN r.kind='image' AND r.metered THEN r.output END) image_turn_output,
-AVG(r.latency_ms) latency_ms,AVG(m.ttft_ms) ttft_ms,AVG(m.speed) speed`
+AVG(r.latency_ms) latency_ms,AVG(m.ttft_ms) ttft_ms,AVG(m.speed) speed,` + tpsStats
 
 func (a *app) analytics(w http.ResponseWriter, r *http.Request, _ string) {
 	q := r.URL.Query()
@@ -152,7 +158,7 @@ func (a *app) analytics(w http.ResponseWriter, r *http.Request, _ string) {
 	}
 	report := M{"summary": summary[0], "lifetime": lifetime[0], "buckets": buckets, "models": models, "keys": keys, "start": start, "end": stop, "step": seconds}
 	if q.Get("recent") == "1" {
-		recent, err := rows(tx, "SELECT r.*,k.name key_name"+ledger+where+" ORDER BY r.created DESC,r.rowid DESC LIMIT 8", args...)
+		recent, err := rows(tx, "SELECT "+requestFields+ledger+where+" ORDER BY r.created DESC,r.rowid DESC LIMIT 8", args...)
 		if err != nil {
 			internal(w, err)
 			return

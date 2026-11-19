@@ -154,3 +154,98 @@ func TestPreviewAndLegacyCounters(t *testing.T) {
 		t.Fatal("incorrect cumulative delta")
 	}
 }
+
+func TestOutputTPSAggregation(t *testing.T) {
+	a := testApp(t, t.TempDir())
+	token, owner := newKey(t, a)
+	otherToken, other := newKey(t, a)
+	// Separate buckets. Each row represents one request, even if both log directions exist.
+	at := (now()/300)*300 - 600
+	for _, row := range []struct {
+		id, key, model, kind    string
+		status, output, metered int
+		at                      int64
+		speed                   any
+	}{
+		{"one", owner, "alpha", "chat", 200, 100, 1, at, 12.5},
+		{"two", owner, "alpha", "chat", 200, 180, 1, at, 37.5},
+		{"three", other, "beta", "chat", 200, 500, 1, at + 300, 70},
+		{"old", other, "beta", "chat", 200, 500, 1, at - 86400, 80},
+		{"image", owner, "alpha", "image", 200, 500, 1, at, 900},
+		{"failure", owner, "alpha", "chat", 499, 500, 1, at, 800},
+		{"short", owner, "alpha", "chat", 200, 99, 1, at, 700},
+		{"legacy", owner, "alpha", "chat", 200, 100, 1, at, nil},
+		{"unmetered", owner, "alpha", "chat", 200, 100, 0, at, 600},
+	} {
+		if _, err := a.db.Exec("INSERT INTO requests VALUES(?,?,'',?,?,?,0,?,?,1500,?)", row.id, row.key, row.kind, row.model, row.status, row.output, row.metered, row.at); err != nil {
+			t.Fatal(err)
+		}
+		if row.speed != nil {
+			if _, err := a.db.Exec("INSERT INTO request_metrics(request_id,speed) VALUES(?,?)", row.id, row.speed); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, direction := range []string{"ingress", "egress"} {
+		if _, err := a.db.Exec("INSERT INTO log_events(request_id,direction,created,method,path,status,latency_ms) VALUES('one',?,?,'POST','/v1/chat/completions',200,1500)", direction, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type stats struct {
+		Average *float64 `json:"avg_tps"`
+		Peak    *float64 `json:"peak_tps"`
+		Samples int      `json:"tps_samples"`
+	}
+	check := func(s stats, n int, avg, peak float64) {
+		t.Helper()
+		if s.Samples != n || s.Average == nil || *s.Average != avg || s.Peak == nil || *s.Peak != peak {
+			t.Errorf("expected %d samples, average %v and peak %v, got %+v", n, avg, peak, s)
+		}
+	}
+	get := func(path, key string, target any) {
+		t.Helper()
+		decode(t, hit(t, a, "GET", path, key, "", "", 200), target)
+	}
+	var report struct {
+		Summary, Lifetime     stats
+		Buckets, Models, Keys []stats
+		Recent                []struct {
+			ID  string
+			TPS *float64
+		}
+	}
+	get("/admin/analytics?hours=1&step=300&recent=1", testAdmin, &report)
+	check(report.Summary, 3, 40, 70)
+	check(report.Lifetime, 4, 50, 80)
+	if len(report.Buckets) != 2 || len(report.Models) != 2 || len(report.Keys) != 2 {
+		t.Fatal(report)
+	}
+	for _, group := range [][]stats{report.Buckets, report.Models, report.Keys} {
+		check(group[0], 2, 25, 37.5)
+		check(group[1], 1, 70, 70)
+	}
+	for _, row := range report.Recent {
+		if row.ID == "three" && (row.TPS == nil || *row.TPS != 70) {
+			t.Fatal("missing TPS from recent requests")
+		}
+		if row.ID == "short" && row.TPS != nil {
+			t.Fatal("short reply acquired a TPS sample")
+		}
+	}
+	get("/admin/analytics?hours=1&model=beta&owner="+other, testAdmin, &report)
+	check(report.Summary, 1, 70, 70)
+	get("/admin/analytics?hours=1&kind=image", testAdmin, &report)
+	if report.Summary.Average != nil || report.Summary.Peak != nil || report.Summary.Samples != 0 {
+		t.Fatal("empty TPS cohort must have null rates")
+	}
+	var s stats
+	get("/v1/usage", token, &s)
+	check(s, 2, 25, 37.5)
+	get("/v1/usage", otherToken, &s)
+	check(s, 2, 75, 80)
+	var logs struct{ Data []struct{ TPS float64 } }
+	get("/admin/diagnostics/logs?search=one", testAdmin, &logs)
+	if len(logs.Data) != 2 || logs.Data[0].TPS != 12.5 || logs.Data[1].TPS != 12.5 {
+		t.Fatal("incorrect per-request log TPS", logs)
+	}
+}

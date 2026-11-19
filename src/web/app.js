@@ -2,7 +2,7 @@ import {editBinding} from "./key-binding.mjs";
 import {dashboardView} from "./dashboard.mjs";
 import {apiPath, siteView} from "./site.mjs";
 import {icon} from "./icons.mjs";
-import { logsView, errorsView } from "./monitor.mjs";
+import { logsView, errorsView, metric } from "./monitor.mjs";
 import { usageView } from "./trends.mjs";
 import {
   msg,
@@ -223,6 +223,7 @@ function logTable(root, items) {
       msg("col.model"),
       msg("col.status"),
       msg("col.usage"),
+      msg("monitor.tps"),
       msg("col.latency"),
     ],
     items,
@@ -235,6 +236,7 @@ function logTable(root, items) {
         i.metered
           ? () => `${number(i.input)()} / ${number(i.output)()}`
           : msg("usage.unknown"),
+      (i) => metric(i.tps, "tok/s"),
       (i) => () => number(i.latency_ms)() + " ms",
     ],
   );
