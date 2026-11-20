@@ -246,8 +246,8 @@ func TestResidentCLI(t *testing.T) {
 // block delivery on a different thread or steal a pending JSON-RPC reply.
 func TestAppServerDispatch(t *testing.T) {
 	s := &appServer{threads: make(map[string]*turnInbox), pending: make(map[uint64]chan packet), denials: make(chan M, 1)}
-	slow, _ := s.subscribe("slow")
-	other, _ := s.subscribe("other")
+	slow, _ := s.subscribe("slow", false)
+	other, _ := s.subscribe("other", false)
 	notify := func(thread string) {
 		data, _ := json.Marshal(M{"threadId": thread, "turnId": "turn", "delta": thread})
 		if !s.dispatch(packet{Method: "item/agentMessage/delta", Params: data}) {

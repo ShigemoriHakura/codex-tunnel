@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -47,7 +46,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	image := r.URL.Path == "/v1/images/generations"
 	responses := r.URL.Path == "/v1/responses"
 	var native *responsesRequest
-	var chatMessages []chatMessage
+	var chat *responsesRequest
 	sid := r.Header.Get("X-Session-ID")
 	binding := boundSession(r)
 	if !image && binding != "" {
@@ -58,9 +57,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		sid = binding
 	}
 	t := turn{image: image, persist: sid != ""}
-	var latest chatMessage
 	var output imageOutput
-	var direct *imageRequest
 	var imageParams imageRequest
 	reply := generationResponse{w: w, image: image, responses: responses}
 	stream, includeUsage := false, false
@@ -102,14 +99,8 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			return
 		}
 		stream = b.Stream
-		if b.PartialImages != nil && (*b.PartialImages < 0 || *b.PartialImages > 3 || *b.PartialImages > 0 && !stream) {
-			fail(w, 400, "invalid_image_option", "partial_images must be 0–3 and previews require stream=true")
-			return
-		}
-		if strings.HasPrefix(b.Model, "gpt-image-") || b.Model == "chatgpt-image-latest" {
-			direct = b
-		} else if (b.Size != "" && b.Size != "auto") || (b.Quality != "" && b.Quality != "auto") || (b.Background != "" && b.Background != "auto" && b.Background != "opaque") || b.Moderation != "" || b.SafetyIdentifier != "" || b.User != "" {
-			fail(w, 400, "invalid_image_option", "Specify an image model such as gpt-image-2.5-sunburst to select image generation parameters")
+		if err := b.cliOptions(); err != nil {
+			fail(w, 400, "invalid_image_option", err.Error())
 			return
 		}
 		output = b.imageOutput
@@ -119,6 +110,9 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		}
 		b.imageOutput = output
 		t.model = b.Model
+		if b.Model == pinnedImageModel {
+			t.imageModel, t.model = b.Model, ""
+		}
 		t.input = []turnInput{{Type: "text", Text: b.Prompt}}
 
 	} else if responses {
@@ -149,24 +143,26 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			fail(w, 400, "invalid_messages", "Send only the new user message in session mode")
 			return
 		}
-		var transcript []message
 		var err error
-		t.input, transcript, err = chatInputs(b.Messages)
+		chat, err = chatResponseRequest(b.Messages, b.Model)
+		if err == nil {
+			err = t.responseInput(chat.input)
+		}
 		if err != nil {
 			fail(w, 400, "invalid_messages", err.Error())
 			return
 		}
 		t.model = b.Model
-		chatMessages = b.Messages
 		stream = b.Stream
 		includeUsage = b.StreamOptions != nil && b.StreamOptions.IncludeUsage
 		if trace != nil && trace.capture {
-			trace.reqBody = preview(M{"model": b.Model, "messages": transcript, "stream": b.Stream})
-		}
-		if boundSession(r) != "" && len(b.Messages) > 1 {
-			latest = b.Messages[len(b.Messages)-1]
+			trace.reqBody = preview(M{"model": b.Model, "messages": responseMessages(chat.input), "stream": b.Stream})
 		}
 
+	}
+	if !image && isImageEngine(t.model) {
+		fail(w, 400, "invalid_model", "Use /v1/images/generations with a supported CLI image engine")
+		return
 	}
 	if len(t.model) > 200 {
 		fail(w, 400, "invalid_model", "Model name too long")
@@ -247,12 +243,8 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		if refreshSession && !readSession() {
 			return
 		}
-		if t.thread != "" && latest.Role != "" {
-			t.input, e = latest.parts()
-			if e != nil {
-				reject(400, "invalid_messages", e.Error())
-				return
-			}
+		if t.thread != "" && binding != "" {
+			t.history = nil // A bound client may replay the full conversation on each request.
 		}
 		if pinnedModel != "" {
 			t.model = pinnedModel
@@ -270,10 +262,11 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			return
 		}
 		if head != "" && !responses {
-			if boundSession(r) != "" && len(chatMessages) > 1 {
-				chatMessages = chatMessages[len(chatMessages)-1:]
+			native = chat
+			native.model = t.model
+			if binding != "" && len(native.input) > 1 {
+				native.input = native.input[len(native.input)-1:]
 			}
-			native = chatResponseRequest(chatMessages, t.model)
 		}
 	}
 	var contextItems responseItems
@@ -331,14 +324,10 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	var runErr error
 	outputStream := responseStream{id: rid, stream: responses && stream, reply: &reply, model: t.model, created: start.Unix()}
 	if native != nil {
-		outputStream.chatDelta = t.delta
 		outputStream.store = native.store
 		outputStream.previous = native.previous
-		runErr = a.runResponses(ctx, run, native, owner, contextItems, &outputStream)
-		res = outputStream.result
-		prior = counts{} // Responses usage belongs to this HTTP call.
-	} else if direct != nil {
-		res, runErr = a.generateNamedImage(ctx, run, *direct, func(e imageEvent) error { return reply.write(imagePartial, e) })
+		res, runErr = a.runResponses(ctx, run, native, contextItems, &outputStream, t.delta)
+		prior = counts{} // Each Responses request replays its owned context in an ephemeral CLI thread.
 	} else {
 		res, runErr = run.run(ctx, a.servers, t)
 		if runErr == nil && image {
@@ -367,9 +356,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	status := errorStatus(ctx, runErr)
 	if trace != nil {
 		trace.model = model
-		if direct == nil && native == nil {
-			recordHop(ctx, "stdio", "codex/app-server/turn", upstreamStart, hopErr)
-		}
+		recordHop(ctx, "stdio", "codex/app-server/turn", upstreamStart, hopErr)
 		if trace.capture {
 			safe := make([]turnInput, len(t.input))
 			copy(safe, t.input)
@@ -380,8 +367,6 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			}
 			if native != nil {
 				trace.outBody = preview(M{"model": t.model, "input_items": len(contextItems), "stream": true})
-			} else if direct != nil {
-				trace.outBody = preview(direct.providerRequest())
 			} else {
 				trace.outBody = preview(M{"model": t.model, "thread": t.thread, "input": safe})
 			}
@@ -464,9 +449,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	}()
 	if responses {
 		if stream {
-			var typ string
-			_ = json.Unmarshal(outputStream.terminal["type"], &typ)
-			deliveryErr = reply.write(typ, outputStream.terminal)
+			deliveryErr = outputStream.send("response.completed", M{"response": outputStream.final})
 		} else {
 			deliveryErr = reply.finishJSON(outputStream.final)
 		}
@@ -476,7 +459,11 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		if stream {
 			deliveryErr = reply.write(imageCompleted, imageParams.completedEvent(res))
 		} else {
-			deliveryErr = reply.finishJSON(M{"created": start.Unix(), "output_format": output.Format, "data": []M{{"b64_json": res.image}}})
+			payload := M{"created": start.Unix(), "output_format": output.Format, "data": []M{{"b64_json": res.image}}}
+			if res.imageModel != "" {
+				payload["model"] = res.imageModel
+			}
+			deliveryErr = reply.finishJSON(payload)
 		}
 		return
 	}

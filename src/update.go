@@ -195,7 +195,8 @@ func (r runner) checkProtocol(ctx context.Context) error {
 		return e
 	}
 	required := map[string][]string{
-		"TurnStartParams": {"environments"}, "ThreadStartParams": {"environments"},
+		"TurnStartParams": {"environments", "effort", "outputSchema"}, "ThreadStartParams": {"environments", "dynamicTools"},
+		"ThreadInjectItemsParams": {"items", "threadId"}, "ModelProviderCapabilitiesReadResponse": {"imageGeneration"},
 		"TurnInterruptParams": {"threadId", "turnId"}, "ThreadUnsubscribeParams": {"threadId"},
 	}
 	for name, fields := range required {

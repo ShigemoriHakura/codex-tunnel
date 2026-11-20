@@ -49,11 +49,18 @@ func visionPayload(t *testing.T, text string, stream bool, urls ...string) strin
 }
 func TestChatContent(t *testing.T) {
 	url := "data:image/png;base64," + png
-	input, summary, err := chatInputs([]chatMessage{{Role: "system", Content: json.RawMessage(`"Context"`)}, {Role: "user", Content: json.RawMessage(`[{"type":"image_url","image_url":{"url":"` + url + `","detail":"auto"}},{"type":"text","text":"read this"}]`)}})
-	if err != nil || len(input) != 3 || input[2].URL != url || input[2].Detail != "auto" || !strings.Contains(input[0].Text, "[Image 1]") || strings.Contains(input[0].Text, url) || strings.Contains(preview(summary), url) {
-		t.Fatal("multimodal transcript conversion failed", err)
+	chat, err := chatResponseRequest([]chatMessage{{Role: "system", Content: json.RawMessage(`"Context"`)}, {Role: "user", Content: json.RawMessage(`[{"type":"image_url","image_url":{"url":"` + url + `","detail":"auto"}},{"type":"text","text":"read this"}]`)}}, "")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, raw := range []string{`[{"type":"image_url","image_url":{"url":"https://example.invalid/image.png"}}]`, `[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + png + `","detail":"low"}}]`, `[{"type":"image_url","image_url":{"url":"file:///tmp/example"}}]`, `[{"type":"image_url","image_url":{"url":"data:image/png;base64,!"}}]`, `[]`, `null`} {
+	var turn turn
+	if err := turn.responseInput(chat.input); err != nil {
+		t.Fatal(err)
+	}
+	if len(turn.history) != 1 || !strings.Contains(string(turn.history[0]), `"role":"system"`) || len(turn.input) != 2 || turn.input[0].URL != url || turn.input[0].Detail != "auto" || turn.input[1].Text != "read this" || strings.Contains(preview(responseMessages(chat.input)), url) {
+		t.Fatal("multimodal history or typed user input changed")
+	}
+	for _, raw := range []string{`[{"type":"image_url","image_url":{"url":"https://example.invalid/image.png"}}]`, `[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + png + `","detail":"medium"}}]`, `[{"type":"image_url","image_url":{"url":"file:///tmp/example"}}]`, `[{"type":"image_url","image_url":{"url":"data:image/png;base64,!"}}]`, `[]`, `null`} {
 		if _, err := (chatMessage{Role: "user", Content: json.RawMessage(raw)}).parts(); err == nil {
 			t.Fatal("accepted malformed image input")
 		}
@@ -79,8 +86,12 @@ func TestChatReasoningMetadata(t *testing.T) {
 	if !boundedBody(httptest.NewRecorder(), r, &b, chatBodyLimit) {
 		t.Fatal("reasoning metadata rejected by the request decoder")
 	}
-	input, transcript, err := chatInputs(b.Messages)
-	if err != nil || len(transcript) != 2 || len(input) != 1 || transcript[0].Content != "visible answer" || transcript[1].Content != "continue" || strings.Contains(input[0].Text, "private-fixture-metadata") {
-		t.Fatal("incorrect public transcript", err)
+	chat, err := chatResponseRequest(b.Messages, b.Model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript := responseMessages(chat.input)
+	if len(transcript) != 2 || transcript[0].Content != "visible answer" || transcript[1].Content != "continue" || strings.Contains(string(rawJSON(chat.input)), "private-fixture-metadata") {
+		t.Fatal("incorrect public transcript")
 	}
 }

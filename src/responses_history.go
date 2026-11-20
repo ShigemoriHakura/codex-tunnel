@@ -137,10 +137,13 @@ func (b *responsesRequest) save(tx *sql.Tx, sid, owner, id string, out *response
 	return err
 }
 
-func chatResponseRequest(msgs []chatMessage, model string) *responsesRequest {
-	b := &responsesRequest{model: model, fields: responseFields{"model": rawJSON(model)}}
+func chatResponseRequest(msgs []chatMessage, model string) (*responsesRequest, error) {
+	b := &responsesRequest{model: model}
 	for _, m := range msgs {
-		parts, _ := m.parts()
+		parts, err := m.parts()
+		if err != nil {
+			return nil, err
+		}
 		if len(parts) == 0 {
 			continue
 		}
@@ -162,7 +165,7 @@ func chatResponseRequest(msgs []chatMessage, model string) *responsesRequest {
 		}
 		b.input = append(b.input, rawJSON(M{"type": "message", "role": m.Role, "content": content}))
 	}
-	return b
+	return b, nil
 }
 
 // Existing CLI-backed turns remain in the CLI. When a client switches protocol

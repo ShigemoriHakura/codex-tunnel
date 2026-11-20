@@ -331,6 +331,7 @@ export default {
   "error.model_mismatch": "Create a new session to switch models.",
   "error.session_busy": "Another request is active on this session.",
   "error.image_unavailable": "Codex did not return an image. Check your login, model and quota.",
+  "error.image_tool_unavailable": "The active CLI provider does not offer its built-in image tool.",
   "error.upstream_error": "Codex CLI unavailable or request failed. Check your login, model and quota.",
   "error.unmanaged_cli": "Managed CLI installation is not enabled.",
   "error.update_busy": "An update is already running.",

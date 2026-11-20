@@ -2,12 +2,9 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"image"
 	"image/color"
 	pngcodec "image/png"
-	"io"
-	"net/http"
 	"strings"
 	"testing"
 )
@@ -77,19 +74,10 @@ func TestInvalidImageOptionsDoNotStartCLI(t *testing.T) {
 	}
 }
 
-func TestImageProviderErrorsAndWorkspace(t *testing.T) {
-	for _, origin := range []string{"https://chatgpt.com.example.org", "https://chatgpt.com@other.invalid", "http://chatgpt.com", "https://chatgpt.com:7443", "https://chatgpt.com/extra"} {
-		if _, err := (imageWorkspace{origin, "fixture", "NO_CONSTRAINT"}).endpointFor(imagesPath); err == nil {
-			t.Fatal("accepted an unexpected workspace origin", origin)
-		}
-	}
-	resp := &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"model_not_available","message":"private diagnostic text"}}`))}
-	_, err := readProviderImage(resp, imageRequest{Model: "gpt-image-2.5-sunburst"})
-	if err == nil || errorStatus(context.Background(), err) != 403 || !strings.Contains(err.Error(), "model_not_available") || strings.Contains(err.Error(), "private") {
-		t.Fatalf("incorrect provider error: %v", err)
-	}
-	resp = &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"model":"gpt-image-2","data":[{"b64_json":"` + png + `"}]}`))}
-	if _, err = readProviderImage(resp, imageRequest{Model: "gpt-image-2.5-sunburst"}); err == nil {
-		t.Fatal("accepted the wrong image model")
+func TestCLIImageOptions(t *testing.T) {
+	a := testApp(t, t.TempDir())
+	key, _ := newKey(t, a)
+	for _, field := range []string{`"model":"gpt-image-2.5-sunburst"`, `"size":"1024x1024"`, `"quality":"high"`, `"stream":true,"partial_images":1`} {
+		hit(t, a, "POST", "/v1/images/generations", key, `{"prompt":"draw",`+field+"}", "", 400)
 	}
 }

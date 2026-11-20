@@ -1,50 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"image"
 	"io"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestImageStreamTermination(t *testing.T) {
-	b := imageRequest{Model: "gpt-image-2.5-sunburst", Stream: true}
-	part := ": keepalive\r\nevent: " + imagePartial + "\r\ndata: {\"b64_json\":\"" + png + "\",\r\ndata: \"partial_image_index\":0}\r\n\r\n"
-	for _, end := range []string{"", "data: [DONE]\n\n", "event: error\ndata: {\"error\":{\"code\":\"upstream_failure\"}}\n\n"} {
-		calls := 0
-		_, err := readImageEvents(strings.NewReader(part+end), b, func(e imageEvent) error { calls++; return nil })
-		if err == nil || calls != 1 {
-			t.Fatal("incomplete stream reported success or skipped the preview", err)
-		}
-	}
-	cancel := errors.New("client left")
-	_, err := readImageEvents(strings.NewReader(part), b, func(imageEvent) error { return cancel })
-	if !errors.Is(err, cancel) {
-		t.Fatal("client disconnect ignored", err)
-	}
-}
-
-func TestImageStreamRejection(t *testing.T) {
-	for _, tc := range []struct {
-		body     string
-		fallback bool
-	}{
-		{`{"detail":[{"loc":["body","stream"],"type":"extra_forbidden"},{"loc":["body","partial_images"],"type":"extra_forbidden"}]}`, true},
-		{`{"detail":"Unsupported parameter: 'stream'"}`, true},
-		{`{"error":{"code":"model_not_available","param":"model"}}`, false},
-		{`{"error":{"code":"invalid_value","param":"partial_images"}}`, false},
-	} {
-		_, err := readProviderImage(&http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(tc.body))}, imageRequest{})
-		var e *imageProviderError
-		if !errors.As(err, &e) || e.streamUnsupported != tc.fallback {
-			t.Fatal("wrong retry decision", err)
-		}
-	}
-}
 
 type failedImageWriter struct{ *httptest.ResponseRecorder }
 
@@ -69,5 +34,93 @@ func TestImageHeartbeatCancelsFailedDelivery(t *testing.T) {
 	defer end()
 	if errorStatus(expired, expired.Err()) != 504 {
 		t.Fatal("gateway deadline must remain 504")
+	}
+}
+
+// Supply a CLI peer with a project login and the image capability. The real-CLI
+// integration suite separately exercises providers that return only text.
+func TestCLIImageEvents(t *testing.T) {
+	a := testApp(t, t.TempDir())
+	key, _ := newKey(t, a)
+	peer := &appServer{
+		config: serverConfig{runner: a.base}, image: true, ctx: a.servers.ctx,
+		ready: make(chan struct{}), writes: make(chan M), denials: make(chan M),
+		pending: make(map[uint64]chan packet), threads: make(map[string]*turnInbox),
+	}
+	close(peer.ready)
+	a.servers.current[true] = peer
+	done := make(chan struct{})
+	defer func() { a.servers.close(); <-done }()
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-peer.ctx.Done():
+				return
+			case frame := <-peer.writes:
+				reply := M{}
+				switch frame["method"] {
+				case "account/read":
+					reply = M{"account": M{"type": "apiKey"}}
+				case "modelProvider/capabilities/read":
+					reply = M{"imageGeneration": true}
+				case "thread/start":
+					reply = M{"thread": M{"id": "image-thread"}, "model": "fixture-model"}
+				case "turn/start":
+					reply = M{"turn": M{"id": "image-turn"}}
+				case "thread/unsubscribe":
+				default:
+					t.Errorf("unexpected image RPC %v", frame["method"])
+				}
+				peer.dispatch(packet{ID: rawJSON(frame["id"]), Result: rawJSON(reply)})
+				if frame["method"] == "turn/start" {
+					for _, e := range []struct {
+						method string
+						field  string
+						value  M
+					}{
+						{"item/completed", "item", M{"type": "imageGeneration", "status": "completed", "result": png}},
+						{"thread/tokenUsage/updated", "tokenUsage", M{"total": counts{Input: 11, Output: 20}}},
+						{"turn/completed", "turn", M{"id": "image-turn", "status": "completed"}},
+					} {
+						peer.dispatch(packet{Method: e.method, Params: rawJSON(M{"threadId": "image-thread", "turnId": "image-turn", e.field: e.value})})
+					}
+				}
+			}
+		}
+	}()
+	for _, stream := range []bool{false, true} {
+		body := hit(t, a, "POST", "/v1/images/generations", key, string(rawJSON(M{"prompt": "draw", "stream": stream, "output_format": "webp"})), "", 200)
+		var obj struct {
+			Type  string
+			Size  string
+			Bytes []byte `json:"b64_json"`
+			Data  []struct {
+				Bytes []byte `json:"b64_json"`
+			}
+		}
+		if stream {
+			_, body, _ = strings.Cut(body, "data: ")
+		}
+		decode(t, body, &obj)
+		data := obj.Bytes
+		if stream {
+			if obj.Type != imageCompleted || obj.Size != "1x1" {
+				t.Fatalf("invalid terminal image event %s", body)
+			}
+		} else {
+			if len(obj.Data) != 1 {
+				t.Fatal("missing generated image")
+			}
+			data = obj.Data[0].Bytes
+		}
+		_, format, err := image.DecodeConfig(bytes.NewReader(data))
+		if err != nil || format != "webp" {
+			t.Fatal("invalid encoded image", err)
+		}
+	}
+	var metered int
+	if err := a.db.QueryRow("SELECT count(*) FROM requests WHERE kind='image' AND model='fixture-model' AND input=11 AND output=20 AND status=200").Scan(&metered); err != nil || metered != 2 {
+		t.Fatal(metered, err)
 	}
 }

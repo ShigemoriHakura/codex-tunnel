@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -11,7 +9,6 @@ import (
 	_ "image/jpeg"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -161,16 +158,10 @@ func TestCLIIntegration(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
 	t.Setenv("NO_PROXY", "127.0.0.1,localhost,::1")
-	allowPreview := make(chan struct{})
-	allowFinal := make(chan struct{})
-	var fallbackCalls atomic.Int32
-	var smallImage, largeImage, namedImage atomic.Bool
+	var smallImage, largeImage atomic.Bool
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/accounts/check") {
 			origin := "https://" + r.Host
-			if namedImage.Load() {
-				origin = "https://chatgpt.com"
-			}
 			jsonOut(w, 200, M{"accounts": []M{{
 				"account_id": "loopback-test", "id": "loopback-test",
 				"workspace_backend_origin": origin, "account_routing_override": "NO_CONSTRAINT",
@@ -198,54 +189,6 @@ func TestCLIIntegration(t *testing.T) {
 		}
 		if r.Method != "POST" {
 			http.NotFound(w, r)
-			return
-		}
-		if r.URL.Path == imagesPath {
-			var body M
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			if r.Header.Get("x-codex-image-turn-id") == "" || !namedImage.Load() || r.Header.Get("Authorization") != "Bearer mock-only" || r.Header.Get("ChatGPT-Account-Id") != "loopback-test" ||
-				body["model"] != "gpt-image-2.5-sunburst" || body["quality"] != "max" || body["size"] != "1536x1024" || body["output_format"] != "webp" || body["output_compression"] != float64(86) || body["background"] != "opaque" || body["response_format"] != nil {
-				t.Error("incorrect image model, options, or workspace authorization")
-			}
-			if body["prompt"] == "json-only" {
-				fallbackCalls.Add(1)
-				if body["stream"] == true {
-					jsonOut(w, 400, M{"error": M{"code": "unsupported_parameter", "param": "stream"}})
-					return
-				}
-				if body["partial_images"] != nil {
-					t.Error("preview option on JSON fallback")
-				}
-			} else if body["stream"] == true {
-				if body["partial_images"] != float64(1) || !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
-					t.Error("missing stream negotiation")
-				}
-				// Simulate an image upstream that sends no headers or bytes until the preview is ready.
-				select {
-				case <-allowPreview:
-				case <-time.After(30 * time.Second):
-					t.Error("downstream timed out waiting for image keep-alives")
-					return
-				case <-r.Context().Done():
-					return
-				}
-				w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-				fmt.Fprintf(w, "event: %s\ndata: {\"type\":%q,\"b64_json\":%q,\"partial_image_index\":0}\n\n", imagePartial, imagePartial, png)
-				w.(http.Flusher).Flush()
-				select {
-				case <-allowFinal:
-				case <-time.After(15 * time.Second):
-					t.Error("preview was buffered until completion")
-					return
-				case <-r.Context().Done():
-					return
-				}
-				fmt.Fprintf(w, "event: %s\ndata: {\"type\":%q,\"b64_json\":%q,\"usage\":{\"input_tokens\":11,\"output_tokens\":20,\"total_tokens\":31}}\n\n", imageCompleted, imageCompleted, png)
-				return
-			}
-			jsonOut(w, 200, M{"data": []M{{"b64_json": png}}, "usage": M{"input_tokens": 12, "output_tokens": 60}})
 			return
 		}
 		if r.URL.Path == "/v1/images/generations" {
@@ -391,27 +334,11 @@ func TestCLIIntegration(t *testing.T) {
 	if _, e := a.base.models(ctx, a.servers); e != nil {
 		t.Fatal(e)
 	}
-	// The pinned CLI offers the image tool only for a Codex-backend login. This
-	// deliberately unsigned, non-functional identity is confined to our loopback provider.
-	enc := base64.RawURLEncoding.EncodeToString
-	jwt := enc([]byte(`{"alg":"none"}`)) + "." + enc([]byte(`{"sub":"mock","email":"test@example.invalid","https://api.openai.com/auth":{"chatgpt_plan_type":"plus","chatgpt_account_id":"loopback-test"}}`)) + ".x"
-	auth, _ := json.Marshal(M{"auth_mode": "chatgpt", "tokens": M{"id_token": jwt, "access_token": "mock-only", "refresh_token": "mock-only", "account_id": "loopback-test"}, "last_refresh": time.Now().UTC()})
-	if e := os.WriteFile(filepath.Join(a.base.home, "auth.json"), auth, 0600); e != nil {
-		t.Fatal(e)
-	}
-	out = hit(t, a, "POST", "/v1/images/generations", key, `{"prompt":"draw","model":"gpt-5.4","size":"auto","quality":"auto","background":"auto","output_format":"jpeg","output_compression":85,"response_format":"b64_json"}`, "", 200)
-	var generated struct {
-		OutputFormat string `json:"output_format"`
-		Data         []struct {
-			Bytes []byte `json:"b64_json"`
-		}
-	}
-	decode(t, out, &generated)
-	if generated.OutputFormat != "jpeg" || len(generated.Data) != 1 {
-		t.Fatal("missing generated JPEG")
-	}
-	if _, format, err := image.Decode(bytes.NewReader(generated.Data[0].Bytes)); err != nil || format != "jpeg" {
-		t.Fatal("requested JPEG did not decode", format, err)
+	// Only the loopback account reader sees this nonfunctional plan identity.
+	writeMockPlanLogin(t, a.base.home)
+	out = hit(t, a, "POST", "/v1/images/generations", key, `{"model":"gpt-image-2","prompt":"draw","output_format":"webp","stream":true}`, "", 200)
+	if !strings.Contains(out, "event: image_generation.completed") || !strings.Contains(out, `"output_format":"webp"`) || !strings.Contains(out, `"model":"gpt-image-2"`) {
+		t.Fatal(out)
 	}
 	if out := hit(t, a, "GET", "/admin/account", testAdmin, "", "", 200); !strings.Contains(out, `"type":"chatgpt"`) {
 		t.Fatal(out)
@@ -472,122 +399,13 @@ func TestCLIIntegration(t *testing.T) {
 	if stats.Summary.Requests != 3 || stats.Summary.Priced != 2 || stats.Summary.Cached < 8 {
 		t.Fatalf("unexpected ledger metrics: %+v", stats)
 	}
-	img := hit(t, a, "GET", "/admin/diagnostics/logs?search=images", testAdmin, "", "", 200)
-	var images struct {
-		Data []struct {
-			Seq     int
-			Account string
-		}
-	}
-	decode(t, img, &images)
-	if len(images.Data) != 1 || !strings.HasPrefix(images.Data[0].Account, "acct_") {
-		t.Fatal("missing pseudonymous image account")
-	}
-	imageDetail := hit(t, a, "GET", fmt.Sprintf("/admin/diagnostics/logs/%d", images.Data[0].Seq), testAdmin, "", "", 200)
-	if strings.Contains(imageDetail, png) || strings.Contains(imageDetail, "loopback-test") {
-		t.Fatal("image content or account identity in preview")
-	}
+	// Reuse the same plan login for both text APIs; all inference hits the
+	// loopback CLI provider, including Chat continuing a Responses session.
+	hit(t, a, "POST", "/v1/responses", key, `{"model":"gpt-5.4","input":"continued"}`, "", 200)
+	hit(t, a, "POST", "/v1/chat/completions", key, `{"messages":[{"role":"user","content":"continue"}]}`, "", 200)
 	other, _ := newKey(t, a)
 	if s := hit(t, a, "GET", "/v1/usage", other, "", "", 200); !strings.Contains(s, `"requests":0`) {
 		t.Fatal(s)
-	}
-
-	namedImage.Store(true)
-	mockURL, err := url.Parse(mock.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a.workspaceTransport = testTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Scheme != "https" || r.URL.Host != "chatgpt.com" || r.URL.Path != imagesPath {
-			return nil, fmt.Errorf("unexpected image destination")
-		}
-		req := r.Clone(r.Context())
-		req.URL.Scheme, req.URL.Host = mockURL.Scheme, mockURL.Host
-		req.Host = mockURL.Host
-		return mock.Client().Transport.RoundTrip(req)
-	})
-	out = hit(t, a, "POST", "/v1/images/generations", key, `{"prompt":"fixture","model":"gpt-image-2.5-sunburst","quality":"max","size":"1536x1024","background":"opaque","output_format":"webp","output_compression":86,"response_format":"b64_json"}`, "", 200)
-	decode(t, out, &generated)
-	if generated.OutputFormat != "webp" || len(generated.Data) != 1 {
-		t.Fatal("missing Sunburst output")
-	}
-	if _, format, err := image.Decode(bytes.NewReader(generated.Data[0].Bytes)); err != nil || format != "webp" {
-		t.Fatal("bad Sunburst output", err)
-	}
-	var calls int
-	if err := a.db.QueryRow("SELECT count(*) FROM requests WHERE model='gpt-image-2.5-sunburst' AND input=12 AND output=60 AND status=200").Scan(&calls); err != nil || calls != 1 {
-		t.Fatal("missing image usage", err)
-	}
-	srv := httptest.NewServer(a.routes())
-	defer srv.Close()
-	payload := `{"model":"gpt-image-2.5-sunburst","quality":"max","size":"1536x1024","background":"opaque","output_format":"webp","output_compression":86,"stream":true,"partial_images":1,"prompt":"stream-fixture"}`
-	req, err := http.NewRequest("POST", srv.URL+"/v1/images/generations", strings.NewReader(payload))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if !isEventStream(resp.Header.Get("Content-Type")) || resp.StatusCode != 200 {
-		t.Fatal("missing image SSE response", resp.StatusCode)
-	}
-	reader := bufio.NewReader(resp.Body)
-	for i := 0; i < 2; i++ {
-		line, err := reader.ReadString('\n')
-		if err != nil || line != ": keep-alive\n" {
-			t.Fatalf("expected flushed image heartbeat, got %q (%v)", line, err)
-		}
-		if end, err := reader.ReadString('\n'); err != nil || end != "\n" {
-			t.Fatal("incomplete SSE comment")
-		}
-	}
-	close(allowPreview)
-	readEvent := func(want string) imageEvent {
-		t.Helper()
-		name, err := reader.ReadString('\n')
-		for err == nil && (strings.HasPrefix(name, ":") || strings.TrimSpace(name) == "") {
-			name, err = reader.ReadString('\n')
-		}
-		if err != nil || strings.TrimSpace(name) != "event: "+want {
-			t.Fatal("unexpected event", name, err)
-		}
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatal(err)
-		}
-		var e imageEvent
-		if err = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &e); err != nil || e.Type != want {
-			t.Fatal("invalid event", err)
-		}
-		if _, format, err := image.Decode(bytes.NewReader(e.Bytes)); err != nil || format != "webp" {
-			t.Fatal("invalid streamed image")
-		}
-		if end, err := reader.ReadString('\n'); err != nil || end != "\n" {
-			t.Fatal("incomplete SSE framing")
-		}
-		return e
-	}
-	part := readEvent(imagePartial)
-	close(allowFinal)
-	if part.Index == nil || *part.Index != 0 {
-		t.Fatal("missing preview index")
-	}
-	final := readEvent(imageCompleted)
-	if final.Size != "1x1" {
-		t.Fatal("stream completion reported requested dimensions instead of encoded dimensions")
-	}
-	if !strings.Contains(string(final.Usage), `"total_tokens":31`) {
-		t.Fatal("missing final image usage")
-	}
-	if err := a.db.QueryRow("SELECT count(*) FROM requests WHERE model='gpt-image-2.5-sunburst' AND input=11 AND output=20 AND status=200").Scan(&calls); err != nil || calls != 1 {
-		t.Fatal("stream usage was not recorded once", err)
-	}
-	fallback := hit(t, a, "POST", "/v1/images/generations", key, strings.Replace(payload, "stream-fixture", "json-only", 1), "", 200)
-	if fallbackCalls.Load() != 2 || !strings.Contains(fallback, "event: "+imageCompleted) || strings.Contains(fallback, imagePartial) {
-		t.Fatal("invalid JSON provider fallback")
 	}
 
 }
@@ -613,6 +431,12 @@ stream_max_retries=0
 	}
 }
 
-type testTransport func(*http.Request) (*http.Response, error)
-
-func (f testTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+func writeMockPlanLogin(t *testing.T, home string) {
+	t.Helper()
+	enc := base64.RawURLEncoding.EncodeToString
+	jwt := enc([]byte(`{"alg":"none"}`)) + "." + enc([]byte(`{"sub":"mock","email":"test@example.invalid","https://api.openai.com/auth":{"chatgpt_plan_type":"plus","chatgpt_account_id":"loopback-test"}}`)) + ".x"
+	auth, _ := json.Marshal(M{"auth_mode": "chatgpt", "tokens": M{"id_token": jwt, "access_token": "mock-only", "refresh_token": "mock-only", "account_id": "loopback-test"}, "last_refresh": time.Now().UTC()})
+	if e := os.WriteFile(filepath.Join(home, "auth.json"), auth, 0600); e != nil {
+		t.Fatal(e)
+	}
+}

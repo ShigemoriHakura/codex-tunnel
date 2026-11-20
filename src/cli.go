@@ -47,12 +47,13 @@ type packet struct {
 	} `json:"error"`
 }
 type rpc struct {
-	ctx    context.Context
-	cmd    *exec.Cmd
-	in     io.WriteCloser
-	scan   *bufio.Scanner
-	seq    int
-	cancel context.CancelFunc
+	ctx     context.Context
+	cmd     *exec.Cmd
+	in      io.WriteCloser
+	scan    *bufio.Scanner
+	seq     int
+	version string
+	cancel  context.CancelFunc
 }
 
 func (r runner) open(ctx context.Context, image bool) (*rpc, error) {
@@ -83,7 +84,14 @@ func (r runner) open(ctx context.Context, image bool) (*rpc, error) {
 	}
 	p := &rpc{ctx: ctx, cmd: c, in: in, scan: bufio.NewScanner(out), cancel: cancel}
 	p.scan.Buffer(make([]byte, 65536), 36<<20)
-	_, e = p.call("initialize", M{"clientInfo": M{"name": "desk_tunnel", "title": "Desk Tunnel", "version": "1.0.0"}, "capabilities": M{"experimentalApi": true}}, nil)
+	handshake, e := p.call("initialize", M{"clientInfo": M{"name": "desk_tunnel", "title": "Codex Tunnel", "version": "1.0.0"}, "capabilities": M{"experimentalApi": true}}, nil)
+	if e == nil {
+		var hello struct{ UserAgent string }
+		if e = json.Unmarshal(handshake, &hello); e == nil {
+			product, _, _ := strings.Cut(hello.UserAgent, " ")
+			_, p.version, _ = strings.Cut(product, "/")
+		}
+	}
 	if e == nil {
 		e = p.send(M{"method": "initialized"})
 	}
@@ -209,7 +217,7 @@ type result struct {
 	firstToken  time.Time
 	text, model string
 	image       []byte
-	imageMeta   imageMetadata
+	imageModel  string
 	total       counts
 	metered     bool
 }
@@ -217,6 +225,13 @@ type turn struct {
 	thread, model  string
 	input          []turnInput
 	persist, image bool
+	imageModel     string
+	history        responseItems
+	instructions   string
+	effort         string
+	outputSchema   json.RawMessage
+	tools          []M
+	onTool         func(string, string, string, json.RawMessage) error
 	onThread       func(string, string) error
 	delta          func(string) error
 }
@@ -228,10 +243,50 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 	}
 	retire := false
 	defer func() { servers.release(p, retire || errors.Is(err, errUnconfirmedRPC)) }()
+	if t.image {
+		if p.version == "0.170.0" {
+			res.imageModel = pinnedImageModel
+		}
+		if t.imageModel != "" && t.imageModel != res.imageModel {
+			return res, &responsesError{400, "invalid_image_option", "Cannot verify the requested image engine with this CLI version"}
+		}
+		// Provider capability and credential type are independent in 0.170.0.
+		// Its image tool is not registered for standard API-key authentication.
+		if p.version == "0.170.0" {
+			raw, err := p.call(ctx, "account/read", M{"refreshToken": false})
+			if err != nil {
+				return res, err
+			}
+			var login struct{ Account *struct{ Type string } }
+			if err := json.Unmarshal(raw, &login); err != nil {
+				return res, err
+			}
+			if login.Account != nil && login.Account.Type == "apiKey" {
+				return res, &responsesError{503, "image_tool_unavailable", "Codex CLI 0.170.0 does not expose its built-in image tool with a standard API-key login"}
+			}
+		}
+		raw, err := p.call(ctx, "modelProvider/capabilities/read", M{})
+		if err != nil {
+			return res, err
+		}
+		var caps struct{ ImageGeneration bool }
+		if err := json.Unmarshal(raw, &caps); err != nil {
+			return res, err
+		}
+		if !caps.ImageGeneration {
+			return res, &responsesError{503, "image_tool_unavailable", "The active CLI provider does not offer its built-in image generation tool"}
+		}
+	}
 	args := M{"cwd": r.work, "sandbox": "read-only", "approvalPolicy": "never", "developerInstructions": "Answer the user's request directly. You have no local execution environment. Do not use filesystem, command, or connector tools."}
 	method := "thread/start"
 	if t.image {
 		args["developerInstructions"] = "Generate one image using the built-in image generation tool. Do not use filesystem or command tools."
+	}
+	if t.instructions != "" {
+		args["developerInstructions"] = args["developerInstructions"].(string) + "\n" + t.instructions
+	}
+	if len(t.tools) > 0 {
+		args["dynamicTools"] = t.tools
 	}
 	if t.model != "" {
 		args["model"] = t.model
@@ -256,7 +311,7 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 		return res, errUnconfirmedRPC
 	}
 	thread := start.Thread.ID
-	inbox, e := p.subscribe(thread)
+	inbox, e := p.subscribe(thread, t.onTool != nil)
 	if e != nil {
 		return res, e
 	}
@@ -281,8 +336,13 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 		var n struct {
 			ThreadID, TurnID, ItemID, Delta string
 			Item                            struct{ ID, Type, Text, Phase, Result, SavedPath, Status string }
-			Turn                            struct{ ID, Status string }
-			TokenUsage                      struct{ Total counts }
+			Turn                            struct {
+				ID, Status string
+				Error      struct {
+					Info json.RawMessage `json:"codexErrorInfo"`
+				}
+			}
+			TokenUsage struct{ Total counts }
 		}
 		if e := json.Unmarshal(v.Params, &n); e != nil {
 			return e
@@ -323,12 +383,24 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			}
 			done = true
 			if n.Turn.Status != "completed" {
-				return errors.New("upstream turn " + n.Turn.Status)
+				return cliTurnFailure(n.Turn.Status, n.Turn.Error.Info)
 			}
 		}
 		return nil
 	}
-	b, e = p.call(ctx, "turn/start", M{"threadId": thread, "environments": []any{}, "input": t.input})
+	if len(t.history) != 0 {
+		if _, e = p.call(ctx, "thread/inject_items", M{"threadId": thread, "items": t.history}); e != nil {
+			return res, e
+		}
+	}
+	params := M{"threadId": thread, "environments": []any{}, "input": t.input}
+	if t.effort != "" {
+		params["effort"] = t.effort
+	}
+	if t.outputSchema != nil {
+		params["outputSchema"] = t.outputSchema
+	}
+	b, e = p.call(ctx, "turn/start", params)
 	if e != nil {
 		return res, e
 	}
@@ -342,6 +414,18 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 		if e != nil {
 			return res, e
 		}
+		if v.Method == "item/tool/call" && t.onTool != nil {
+			var call struct {
+				ThreadID, TurnID, CallID, Namespace, Tool string
+				Arguments                                 json.RawMessage
+			}
+			if json.Unmarshal(v.Params, &call) != nil || call.ThreadID != thread || call.TurnID != turnID || call.CallID == "" || call.Tool == "" {
+				return res, errors.New("invalid CLI tool request")
+			}
+			// The HTTP client executes its function. finishThread interrupts the pending
+			// CLI turn, and the next request replays the call and result together.
+			return res, t.onTool(call.CallID, call.Namespace, call.Tool, call.Arguments)
+		}
 		if e = event(v); e != nil {
 			return res, e
 		}
@@ -354,6 +438,24 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 	}
 	return res, nil
 }
+func cliTurnFailure(status string, info json.RawMessage) error {
+	var code string
+	_ = json.Unmarshal(info, &code)
+	switch code {
+	case "usageLimitExceeded", "rateLimitExceeded", "sessionBudgetExceeded":
+		return &responsesError{429, "rate_limit_exceeded", "The CLI reported an upstream usage limit"}
+	case "contextWindowExceeded":
+		return &responsesError{400, "context_length_exceeded", "The conversation exceeds the model context window"}
+	case "badRequest":
+		return &responsesError{400, "invalid_request", "The CLI provider rejected the request"}
+	case "modelNotFound":
+		return &responsesError{404, "model_not_found", "The CLI provider could not find the requested model"}
+	case "serverOverloaded", "flexUnavailable", "policyCapacityUnavailable":
+		return &responsesError{503, "upstream_unavailable", "The CLI provider is temporarily unavailable"}
+	}
+	return errors.New("upstream turn " + status)
+}
+
 func (r runner) imageData(thread, inline, path string) ([]byte, error) {
 	const limit = maxGeneratedImageBytes
 	var data []byte

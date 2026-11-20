@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -105,9 +104,9 @@ func (m chatMessage) parts() ([]turnInput, error) {
 				return nil, errors.New("User image_url must contain an inline base64 PNG, JPEG, WebP or GIF data URL")
 			}
 			switch part.Image.Detail {
-			case "", "auto", "high", "original":
+			case "", "auto", "low", "high", "original":
 			default:
-				return nil, errors.New("Use auto, high or original for image_url.detail")
+				return nil, errors.New("Use auto, low, high or original for image_url.detail")
 			}
 			input = append(input, turnInput{Type: "image", URL: part.Image.URL, Detail: part.Image.Detail})
 		default:
@@ -123,42 +122,4 @@ func (m chatMessage) parts() ([]turnInput, error) {
 		return nil, nil
 	}
 	return nil, errors.New("Message must contain text or an image")
-}
-
-// Preserve role boundaries for stateless history. The transcript contains only text
-// and numbered references. The actual images travel as typed CLI inputs.
-func chatInputs(messages []chatMessage) ([]turnInput, []message, error) {
-	var images, single []turnInput
-	transcript := make([]message, 0, len(messages))
-	for _, m := range messages {
-		parts, err := m.parts()
-		if err != nil {
-			return nil, nil, err
-		}
-		if len(parts) == 0 {
-			continue
-		}
-		var summary strings.Builder
-		for _, p := range parts {
-			if p.Type == "image" {
-				images = append(images, p)
-				fmt.Fprintf(&summary, "[Image %d]", len(images))
-			} else {
-				summary.WriteString(p.Text)
-			}
-		}
-		transcript = append(transcript, message{m.Role, summary.String()})
-		if len(transcript) == 1 {
-			single = parts
-		}
-	}
-	if len(transcript) == 1 {
-		return single, transcript, nil
-	}
-	raw, _ := json.Marshal(transcript)
-	input := []turnInput{{Type: "text", Text: "Continue this conversation, answering the final user message:\n" + string(raw)}}
-	for i, img := range images {
-		input = append(input, turnInput{Type: "text", Text: fmt.Sprintf("Image %d:", i+1)}, img)
-	}
-	return input, transcript, nil
 }

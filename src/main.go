@@ -28,17 +28,16 @@ import (
 var webFiles embed.FS
 
 type app struct {
-	db                 *sql.DB
-	admin, cliHome     string
-	base               runner
-	servers            *appServers
-	workspaceTransport http.RoundTripper
-	slots              chan struct{}
-	admitted           chan struct{}
-	sessionTurns       sessionTurns
-	jsonKeepalive      bool
-	installing         sync.Mutex
-	usingResetCredit   sync.Mutex
+	db               *sql.DB
+	admin, cliHome   string
+	base             runner
+	servers          *appServers
+	slots            chan struct{}
+	admitted         chan struct{}
+	sessionTurns     sessionTurns
+	jsonKeepalive    bool
+	installing       sync.Mutex
+	usingResetCredit sync.Mutex
 }
 type clientFn func(http.ResponseWriter, *http.Request, string)
 
@@ -470,10 +469,6 @@ func upstreamFailure(ctx context.Context, e error) (int, string, string) {
 	var re *responsesError
 	if errors.As(e, &re) {
 		return status, re.code, re.message
-	}
-	var provider *imageProviderError
-	if errors.As(e, &provider) {
-		return status, "image_provider_error", provider.Error()
 	}
 	log.Printf("Upstream request failed: %v", e)
 	if errors.Is(e, errNoImage) {

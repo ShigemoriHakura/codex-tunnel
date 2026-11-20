@@ -331,6 +331,7 @@ export default {
   "error.model_mismatch": "切换模型需要新建会话。",
   "error.session_busy": "此会话有请求正在执行。",
   "error.image_unavailable": "Codex 未返回图片，请检查登录方式、模型和配额。",
+  "error.image_tool_unavailable": "当前 CLI 提供方未开放内置生图工具。",
   "error.upstream_error": "Codex CLI 不可用或请求失败，请检查登录状态、模型和配额。",
   "error.unmanaged_cli": "未启用 CLI 托管安装。",
   "error.update_busy": "已有更新正在执行。",

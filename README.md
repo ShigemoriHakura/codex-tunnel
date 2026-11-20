@@ -16,13 +16,15 @@ docker compose exec gateway codex -c 'cli_auth_credentials_store="file"' login s
 
 打开 `http://127.0.0.1:56439`，用 `.env` 中的 `ADMIN_TOKEN` 登录。到 **访问密钥 → 创建密钥**，立即复制一次性显示的 `dt_…`。SDK 的 `base_url` 使用 `http://127.0.0.1:56439/v1`，`api_key` 使用此客户端密钥，**不是**管理员令牌或上游凭据。更改 `.env` 后通过 `docker compose up -d` 重建容器配置。
 
-也可用 API key 登录 CLI（从本机环境变量经 stdin 输入，不要把密钥写进命令参数）：
+已有 Codex 登录的实例可以直接沿用。远端客户端使用网关的 `dt_` 密钥，文本、看图和生图请求均由服务器上的 Codex CLI app-server 执行。若已在 CLI 中使用 API Key 登录，聊天仍使用该登录。0.170.0 版 CLI 对普通 API Key 不提供内置生图工具，网关会在开始推理前返回 `image_tool_unavailable`。
+
+此部署用于从自己的设备操作服务器上的 Codex。CLI 的调用方式不会改变账户的授权范围。通过 Sign in with ChatGPT 接入应用时，套餐授权仅限所连接的应用，不能用来为其他工具提供通用 API。[OpenAI 授权条款 §3.1](https://openai.com/policies/sign-in-with-chatgpt-terms/)
+
+如需在新实例使用项目 API Key，可通过标准输入登录 CLI。
 
 ```sh
 printf '%s' "$OPENAI_API_KEY" | docker compose exec -T gateway codex -c 'cli_auth_credentials_store="file"' login --with-api-key
 ```
-
-**文本、配额和生图是不同的上游能力。** 固定版 CLI 的内置生图工具需要支持它的 Codex 后端登录、模型与账户；普通 API-key 登录能聊天，并不意味着可用该工具。配额查询也可能不受当前账户支持。网关不伪造图片或额度，不会静默切换到另一个计费账户。
 
 ## 在高位端口对外提供 HTTP
 
@@ -42,7 +44,7 @@ TLS_HEALTH_SERVER_NAME=替换为证书SAN包含的公网IP或域名
 
 ### 多层反向代理下的流式响应
 
-网关会在 SSE 响应中发送 `X-Accel-Buffering: no`。客户端与网关之间有多层反向代理时，在需要继续转发该响应头的 Nginx 或 OpenResty 的 `server` 或 `location` 中添加以下指令，检查配置后重新加载。下一层代理收到该响应头后，就能及时向客户端转发生图保活消息和预览。
+网关会在 SSE 响应中发送 `X-Accel-Buffering: no`。客户端与网关之间有多层反向代理时，在需要继续转发该响应头的 Nginx 或 OpenResty 的 `server` 或 `location` 中添加以下指令，检查配置后重新加载。下一层代理收到该响应头后，就能及时向客户端转发生图保活消息和完成事件。
 
 ```nginx
 proxy_pass_header X-Accel-Buffering;
@@ -67,11 +69,11 @@ proxy_pass_header X-Accel-Buffering;
 
 在“站点设置”填写域名（例如 `https://gateway.example.com`）和访问子目录（例如 `/tools/codex`），保存后控制台入口为 `https://gateway.example.com/tools/codex/`，客户端 Base URL 为 `https://gateway.example.com/tools/codex/v1`。空域名使用当前来源，空目录使用根路径。配置写入 SQLite 并即时生效。当前主机的根入口继续可用，方便从错误配置恢复。域名需解析到网关或反向代理，代理应保留完整请求路径。HTTPS 使用该域名对应的证书。跨域名首次访问需单独登录。
 
-请求日志默认仅采集推理元数据，保留最近 2,000 条，可设为 1 至 10,000 条。切换到全部业务接口可排查模型列表、账户、会话等调用。出站记录包含网关交给 CLI 的调用和发往 Images 和 Responses 接口的 HTTP 请求，同次请求的两个方向共用请求 ID。正文预览默认关闭。开启后会保存推理文本，每份预览最多约 8 KiB，对话中可能含有敏感信息。鉴权头、管理接口正文及图片字节均省略。
+请求日志默认仅采集推理元数据，保留最近 2,000 条，可设为 1 至 10,000 条。切换到全部业务接口可排查模型列表、账户、会话等调用。出站记录包含网关交给 Codex app-server 的调用，同次请求的两个方向共用请求 ID。正文预览默认关闭。开启后会保存推理文本，每份预览最多约 8 KiB，对话中可能含有敏感信息。鉴权头、管理接口正文及图片字节均省略。
 
-用量统计以每次执行的推理为单位。暂停采集、清空诊断日志或调整保留条数后，累计用量仍可查询。旧记录原有的请求数及用量会计入趋势，CLI 未报告的字段显示“未报告”。首个文本 Token 耗时以网关实际收到文本增量的时间计算。缓存命中率以有缓存计量的输入 Tokens 为分母。生图按成功和失败计数，并显示 CLI 或 Images 接口报告的用量。美元费用按已知模型的标准短上下文文本单价折算，面板列出可估价的请求数。订阅账单以提供方为准。[OpenAI API 价格表](https://developers.openai.com/api/docs/pricing)
+用量统计以每次执行的推理为单位。暂停采集、清空诊断日志或调整保留条数后，累计用量仍可查询。旧记录原有的请求数及用量会计入趋势，CLI 未报告的字段显示“未报告”。首个文本 Token 耗时以网关实际收到文本增量的时间计算。缓存命中率以有缓存计量的输入 Tokens 为分母。生图按成功和失败计数，并显示 CLI 报告的用量。美元费用按已知模型的标准短上下文文本单价折算，面板列出可估价的请求数。订阅账单以提供方为准。[OpenAI API 价格表](https://developers.openai.com/api/docs/pricing)
 
-“模型与配额”读取网关所用 Codex 配置目录中的登录状态。Docker 部署请在上方的 `gateway` 容器内完成设备登录，再点击“刷新账户和配额”。查看和刷新通过只读 RPC 查询。点击某张重置卡右侧的“使用”，在弹窗中核对账户和卡片，再点“确认使用”。上游只报告数量时，列表显示一行汇总，弹窗会说明由上游分配一张可用卡。操作后页面会显示兑换结果，并刷新额度和卡数。
+“模型与配额”读取网关所用 Codex 配置目录中的登录状态。Docker 部署请在上方的 `gateway` 容器内核对所用的 CLI 登录，再点击“刷新账户和配额”。查看和刷新通过只读 RPC 查询。点击某张重置卡右侧的“使用”，在弹窗中核对账户和卡片，再点“确认使用”。上游只报告数量时，列表显示一行汇总，弹窗会说明由上游分配一张可用卡。操作后页面会显示兑换结果，并刷新额度和卡数。
 
 概览、用量统计和请求日志显示输出 TPS（token/s）。统计使用已记录速度的成功聊天，每次输出至少 100 个 token。单次速度以本轮输出 token 数除以首个文本增量至请求处理结束的秒数。缺少首个文本增量或该时间段短于 20 毫秒时，使用请求总耗时。每个请求贡献一个样本。平均值取各样本的算术平均，峰值取最大值。按时间、模型或密钥筛选时，样本数随之更新。没有样本时，平均值和峰值返回 `null`。
 
@@ -83,7 +85,7 @@ proxy_pass_header X-Accel-Buffering;
 
 网关启动时会与一个常驻 `codex app-server` 完成 stdio 握手。CLI 线程聊天请求复用这个进程，各线程的流式消息和用量独立分发。客户端断开时，网关向对应轮次发送 `turn/interrupt`，结束后通过 `thread/unsubscribe` 释放订阅。CLI 意外退出会结束当时正在处理的请求，下一个请求会启动新进程。网关不会自动重发已经提交的输入。更换 CLI 版本或更新登录文件、配置文件后，新请求使用新进程，旧进程等已有请求结束后退出。
 
-使用 CLI 内置工具生图时，网关按需启动一个单独的常驻进程。`gpt-image-*` 等指定图像模型仍经工作区 Images 接口处理。模型列表、账户状态和限额查询复用常驻连接。读取历史、为指定图像模型获取工作区凭据及重置卡操作使用独立连接。
+生图使用启用了内置图像工具的独立 app-server 进程。模型列表、账户和配额查询复用常驻连接。网关通过 CLI 的 RPC 调用提交推理、接收事件及用量。
 
 会话首次运行后固定模型，重启后可继续。同一会话的生成请求按入队顺序执行，不同会话和无状态请求可以并行。等待同一会话时不占用 CLI 执行槽，断开的请求会退出队列。`MAX_CONCURRENT=4` 时最多同时执行 4 个 CLI 请求，最多接纳 12 个生成请求，每个会话最多接纳 8 个。队列已满返回 `429` 并附带 `Retry-After`。删除正在使用的会话仍返回 `409`。生成中断可能已经改变上游会话，重试前可先读取历史。
 
@@ -109,7 +111,7 @@ curl -N -H "Authorization: Bearer $DT_KEY" -H 'Content-Type: application/json' \
 
 # 3. 生图（返回 data[0].b64_json；不会公开托管图片）
 curl -fsS -H "Authorization: Bearer $DT_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-image-2.5-sunburst","prompt":"画一只墨绿色的纸鹤","size":"1024x1024","quality":"high","n":1,"response_format":"b64_json","output_format":"png"}' \
+  -d '{"prompt":"画一只墨绿色的纸鹤","n":1,"response_format":"b64_json","output_format":"png"}' \
   "$BASE/v1/images/generations" > image-response.json
 
 curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
@@ -121,7 +123,7 @@ curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
 | `GET /v1/models` | 从 CLI `model/list` 分页拉取，不硬编码模型 |
 | `POST /v1/chat/completions` | 文本、图片输入与 SSE；支持 `model`、`messages`、`stream`、`stream_options.include_usage` |
 | `POST /v1/responses` | 创建 Responses 对象。支持 JSON、SSE、文本、内联图片、客户端工具调用和连续对话。 |
-| `POST /v1/images/generations` | 返回一张 Base64 图片。`output_format` 支持 `png`（默认）、`jpeg`、`webp`。JPEG 和 WebP 可设 `output_compression`（0–100）；`model` 可使用 `gpt-image-2.5-sunburst` 等图片模型，直接向当前 Codex 登录工作区的 Images 接口提交模型名、尺寸、质量、背景与输出选项。传入 Codex 聊天模型或省略模型名时，保留 CLI 内置工具模式（尺寸和质量为 `auto`） 设置 `stream: true` 使用 SSE。生图等待期间每 3 秒发送并刷新一条 SSE 保活注释，客户端只需处理图片事件。可用 `partial_images` 请求 0–3 张预览；上游只返回整图时，客户端会收到一个 `image_generation.completed` 事件。 |
+| `POST /v1/images/generations` | 通过原生 CLI 工具生成一张图片。省略 `model` 或提供 Codex 对话模型时，由 CLI 选择图像引擎。在 0.170.0 可精确指定 `gpt-image-2`。`gpt-image-2.5-sunburst`、固定尺寸或非自动质量会返回 400。支持 PNG、JPEG、WebP 和 JPEG/WebP 的 `output_compression`。`stream:true` 发送保活和最终的 `image_generation.completed`，`partial_images` 只能为 0。 |
 | `POST /v1/sessions` | `name`、`model` 都可省略，发送 `{}` 即可 |
 | `GET /v1/sessions` | 本密钥会话，`?offset=100` 翻页，每页最多 100 条 |
 | `GET /v1/sessions/{id}/history` | 从新到旧读取对话轮次，每页 10 轮，用 `next_cursor` 作为下一页的 `cursor` |
@@ -138,7 +140,7 @@ curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
   -d '{"model":"gpt-5.4","input":"用一句话说明这个项目的用途","stream":true,"store":false}'
 ```
 
-省略 `stream` 返回一个包含 `output` 与 `usage` 的 JSON 对象。流式调用返回具名 SSE 事件，如 `response.output_text.delta`、`response.output_item.done` 和 `response.completed`。输入支持字符串、带角色的消息数组、内联 Base64 图片，以及与 `call_id` 匹配的 `function_call_output`。客户端负责执行自己声明的函数。模型和账户决定可用的推理参数与工具。
+省略 `stream` 返回一个包含 `output` 与 `usage` 的 JSON 对象。流式调用返回具名 SSE 事件，如 `response.output_text.delta`、`response.output_item.done` 和 `response.completed`。输入支持字符串、带角色的消息数组、内联 Base64 图片，以及与 `call_id` 匹配的 `function_call_output`。支持 `instructions`、`reasoning.effort` 和 `text.format` 的文本或 JSON Schema 输出。客户端可以声明非严格模式函数，每次回传一个调用结果。网关在临时 CLI 线程中重建该分支的历史，提交函数结果后让模型继续回答。未实现的参数、工具类型和强制工具选择会在请求校验时返回 400。
 
 使用同一密钥传入 `previous_response_id` 可以续聊或从先前的一轮分支。网关默认在本机 SQLite 保存该轮输入及输出以供续聊，独立响应 ID 的有效期为 30 天。`store:false` 关闭按响应 ID 续聊。显式会话和密钥绑定会话会保留对话，后续请求可直接发送新输入。同一会话可以混用 Responses 与 Chat Completions，沿用原有模型、并发队列、用量统计和保活设置。后台任务、托管文件和 WebSocket 传输暂未提供。
 
@@ -150,7 +152,7 @@ curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
 {"messages":[{"role":"user","content":[{"type":"text","text":"图里有什么？"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPoKDcGAAK9ATNQgxqrAAAAAElFTkSuQmCC"}}]}]}
 ```
 
-用户图片通过 Base64 data URL 传入，支持 PNG、JPEG、WebP、GIF。使用图片链接的客户端需先读取图片并转换为 data URL。可选的 `image_url.detail` 支持 `auto`、`high` 和 `original`。图片识别需使用支持视觉输入的上游模型。Chat Completions 和 Responses 的请求上限为 24 MiB，按 Base64 编码后的整个 JSON 请求体计算；其他 JSON 接口上限为 1 MiB。超出上限返回 `413`。无状态的多条消息会作为带角色的上下文交给 CLI。Chat Completions 暂不接受客户端工具调用和 `temperature`。图像接口暂不支持批量生图和图片编辑。未知请求字段返回 `400`。推理超时 10 分钟。上游无计量时返回 `usage: null`，不将其伪装成零消耗。网关累计值是观测值，不含其他应用的调用，不是账单，也不能用来推算订阅余额。
+用户图片通过 Base64 data URL 传入，支持 PNG、JPEG、WebP、GIF。使用图片链接的客户端需先读取图片并转换为 data URL。可选的 `image_url.detail` 支持 `auto`、`low`、`high` 和 `original`。图片识别需使用支持视觉输入的上游模型。Chat Completions 和 Responses 的请求上限为 24 MiB，按 Base64 编码后的整个 JSON 请求体计算；其他 JSON 接口上限为 1 MiB。超出上限返回 `413`。无状态的多条消息会作为带角色的上下文交给 CLI。Chat Completions 暂不接受客户端工具调用和 `temperature`。图像接口暂不支持批量生图和图片编辑。未知请求字段返回 `400`。推理超时 10 分钟。上游无计量时返回 `usage: null`，不将其伪装成零消耗。网关累计值是观测值，不含其他应用的调用，不是账单，也不能用来推算订阅余额。
 
 ## 部署、更新与安全
 

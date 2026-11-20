@@ -60,6 +60,7 @@ type appServer struct {
 	stop     context.CancelFunc
 	ready    chan struct{}
 	startErr error
+	version  string
 	writes   chan M
 	denials  chan M
 	mu       sync.Mutex
@@ -152,6 +153,9 @@ func (s *appServer) serve() {
 	p, err := s.config.runner.open(s.ctx, s.image)
 	timeout.Stop()
 	s.startErr = err
+	if err == nil {
+		s.version = p.version
+	}
 	close(s.ready)
 	if err != nil {
 		s.stop()
@@ -188,6 +192,21 @@ func (s *appServer) serve() {
 // The stdout reader never waits for a client's HTTP writer or invokes its callbacks.
 func (s *appServer) dispatch(v packet) bool {
 	if len(v.ID) != 0 && v.Method != "" {
+		if v.Method == "item/tool/call" {
+			var call struct{ ThreadID string }
+			if json.Unmarshal(v.Params, &call) != nil {
+				return false
+			}
+			s.mu.Lock()
+			i := s.threads[call.ThreadID]
+			if i != nil && i.clientTools {
+				i.push(v)
+			}
+			s.mu.Unlock()
+			if i != nil && i.clientTools {
+				return true
+			}
+		}
 		select {
 		case s.denials <- disabledAction(v):
 			return true
@@ -303,18 +322,19 @@ func (s *appServer) interruptLateTurn(reply <-chan packet, thread string) {
 }
 
 type turnInbox struct {
-	events   chan packet
-	overflow chan struct{}
-	bytes    atomic.Int64
+	clientTools bool
+	events      chan packet
+	overflow    chan struct{}
+	bytes       atomic.Int64
 }
 
-func (s *appServer) subscribe(thread string) (*turnInbox, error) {
+func (s *appServer) subscribe(thread string, clientTools bool) (*turnInbox, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.threads[thread] != nil {
 		return nil, errors.New("Codex thread already has an active turn")
 	}
-	i := &turnInbox{events: make(chan packet, 256), overflow: make(chan struct{})}
+	i := &turnInbox{clientTools: clientTools, events: make(chan packet, 256), overflow: make(chan struct{})}
 	s.threads[thread] = i
 	return i, nil
 }

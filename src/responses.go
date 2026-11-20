@@ -2,19 +2,12 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
+	"regexp"
 	"strings"
-	"time"
 )
 
-const responsesPath = "/backend-api/codex/responses"
+var responseFieldName = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,80}$`)
 
 type responsesError struct {
 	status        int
@@ -28,7 +21,7 @@ type responseFields map[string]json.RawMessage
 type responseItems []json.RawMessage
 
 type responsesRequest struct {
-	fields                  responseFields
+	options                 turn
 	input                   responseItems
 	model, previous, parent string
 	stream, store           bool
@@ -43,14 +36,57 @@ func rawJSON(v any) json.RawMessage {
 }
 
 func parseResponses(f responseFields) (*responsesRequest, error) {
-	b := &responsesRequest{fields: f, store: true}
+	b := &responsesRequest{store: true}
 	for k, v := range f {
 		switch k {
 		case "model":
 			if json.Unmarshal(v, &b.model) != nil || len(b.model) > 200 {
 				return nil, invalidResponse("Invalid model")
 			}
-		case "input", "instructions", "reasoning", "text", "tools", "tool_choice", "parallel_tool_calls", "include", "prompt_cache_key", "client_metadata", "metadata", "max_output_tokens", "temperature", "top_p", "service_tier", "truncation", "safety_identifier", "max_tool_calls", "top_logprobs", "prompt_cache_retention", "verbosity":
+		case "input":
+		case "instructions":
+			if json.Unmarshal(v, &b.options.instructions) != nil {
+				return nil, invalidResponse("instructions must be a string")
+			}
+		case "reasoning":
+			var reasoning struct{ Effort string }
+			if err := strictOption(v, &reasoning); err != nil {
+				return nil, invalidResponse("The CLI adapter supports reasoning.effort only")
+			}
+			b.options.effort = reasoning.Effort
+		case "text":
+			var text struct {
+				Format *struct {
+					Type, Name, Description string
+					Strict                  *bool
+					Schema                  json.RawMessage
+				}
+			}
+			if strictOption(v, &text) != nil {
+				return nil, invalidResponse("Invalid text.format")
+			}
+			if f := text.Format; f != nil {
+				switch f.Type {
+				case "text":
+				case "json_schema":
+					if len(f.Schema) == 0 || f.Schema[0] != '{' {
+						return nil, invalidResponse("text.format.schema must be a JSON Schema object")
+					}
+					b.options.outputSchema = f.Schema
+				default:
+					return nil, invalidResponse("The CLI adapter supports text and json_schema formats")
+				}
+			}
+		case "tools", "tool_choice":
+		case "parallel_tool_calls":
+			if string(v) != "false" {
+				return nil, invalidResponse("The CLI adapter supports one client tool call at a time. Set parallel_tool_calls=false")
+			}
+		case "include":
+			var selectors []string
+			if json.Unmarshal(v, &selectors) != nil || len(selectors) > 0 {
+				return nil, invalidResponse("The CLI adapter does not expose include selectors")
+			}
 		case "stream":
 			if json.Unmarshal(v, &b.stream) != nil {
 				return nil, invalidResponse("stream must be a boolean")
@@ -68,7 +104,7 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 				return nil, invalidResponse("Background responses are unavailable")
 			}
 		default:
-			if !imageErrorCode.MatchString(k) {
+			if !responseFieldName.MatchString(k) {
 				k = "(unknown)"
 			}
 			return nil, invalidResponse("Unsupported Responses field " + k)
@@ -92,9 +128,10 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 	}
 	for index, v := range b.input {
 		var i struct {
-			Type, Role string
-			Content    json.RawMessage
-			Output     json.RawMessage
+			Type, Role, Name string
+			CallID           string `json:"call_id"`
+			Content          json.RawMessage
+			Output           json.RawMessage
 		}
 		if json.Unmarshal(v, &i) != nil {
 			return nil, invalidResponse("Invalid input item")
@@ -124,34 +161,23 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 				}
 				b.input[index] = rawJSON(item)
 			}
-		case "function_call_output", "custom_tool_call_output":
+		case "function_call_output":
+			if i.CallID == "" {
+				return nil, invalidResponse("function_call_output requires a call_id")
+			}
 			if err := validateResponseParts(i.Output); err != nil {
 				return nil, err
 			}
-		case "function_call", "custom_tool_call", "reasoning", "web_search_call", "compaction", "tool_search_call", "tool_search_output":
+		case "function_call":
+			if i.CallID == "" || i.Name == "" {
+				return nil, invalidResponse("function_call requires a call_id and name")
+			}
 		default:
 			return nil, invalidResponse("Unsupported input item type")
 		}
 	}
-	var tools []struct {
-		Type  string
-		Tools []struct{ Type string }
-	}
-	if raw := f["tools"]; len(raw) > 0 && json.Unmarshal(raw, &tools) != nil {
-		return nil, invalidResponse("Invalid tools array")
-	}
-	for _, t := range tools {
-		switch t.Type {
-		case "function", "custom", "web_search", "web_search_preview", "tool_search":
-		case "namespace":
-			for _, n := range t.Tools {
-				if n.Type != "function" && n.Type != "custom" {
-					return nil, invalidResponse("Unsupported namespaced tool")
-				}
-			}
-		default:
-			return nil, invalidResponse("Unsupported Responses tool type")
-		}
+	if err := b.parseTools(f); err != nil {
+		return nil, err
 	}
 	return b, nil
 }
@@ -162,6 +188,8 @@ func validateResponseParts(content json.RawMessage) error {
 	}
 	var parts []struct {
 		Type     string
+		Text     *string
+		Detail   string
 		ImageURL string `json:"image_url"`
 		FileID   string `json:"file_id"`
 	}
@@ -170,8 +198,15 @@ func validateResponseParts(content json.RawMessage) error {
 	}
 	for _, p := range parts {
 		switch p.Type {
-		case "input_text", "output_text", "refusal":
+		case "input_text", "output_text":
+			if p.Text == nil {
+				return invalidResponse("Text content requires a text string")
+			}
+		case "refusal":
 		case "input_image":
+			if p.Detail != "" && p.Detail != "auto" && p.Detail != "low" && p.Detail != "high" && p.Detail != "original" {
+				return invalidResponse("Use auto, low, high or original for input_image.detail")
+			}
 			if p.FileID != "" || !validInlineImage(p.ImageURL) {
 				return invalidResponse("Use an inline base64 image in input_image.image_url")
 			}
@@ -182,138 +217,44 @@ func validateResponseParts(content json.RawMessage) error {
 	return nil
 }
 
-// The client defines and executes its own functions. Send only Responses protocol
-// data to a fixed first-party endpoint selected from the active CLI account.
-func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest, owner string, input responseItems, out *responseStream) (err error) {
-	p, err := a.servers.acquire(ctx, run, false)
-	if err != nil {
-		return err
-	}
-	defer func() { a.servers.release(p, errors.Is(err, errUnconfirmedRPC)) }()
-	f := b.fields
-	delete(f, "previous_response_id")
-	delete(f, "background")
-	f["input"] = rawJSON(input)
-	f["stream"] = rawJSON(true)
-	f["store"] = rawJSON(false)
-	if _, ok := f["instructions"]; !ok {
-		f["instructions"] = rawJSON("")
-	}
-	if cache := f["prompt_cache_key"]; len(cache) > 0 {
-		f["prompt_cache_key"] = rawJSON(digest(owner + string(cache)))
-	}
-	body, err := json.Marshal(f)
-	if err != nil {
-		return err
-	}
-	if len(body) > chatBodyLimit {
-		return invalidResponse("Combined Responses context exceeds 24 MiB")
-	}
-	client := http.Client{Transport: a.workspaceTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	var identity string
-	for attempt := 0; attempt < 2; attempt++ {
-		account, e := p.call(ctx, "account/read", M{"refreshToken": attempt != 0})
-		if e != nil {
-			return e
-		}
-		var detail struct{ Account struct{ Type string } }
-		if e = json.Unmarshal(account, &detail); e != nil {
-			return e
-		}
-		var endpoint, token, accountID, region string
-		if detail.Account.Type == "apiKey" {
-			endpoint = "https://api.openai.com/v1/responses"
-			token = run.responsesAPIKey()
-			if token == "" {
-				return errors.New("Codex API key is unavailable")
-			}
-		} else {
-			ws, key, e := run.workspaceCredential(account)
-			if e != nil {
-				return e
-			}
-			endpoint, e = ws.endpointFor(responsesPath)
-			if e != nil {
-				return e
-			}
-			token, accountID, region = key, ws.ChatGPTAccountID, ws.AccountRoutingOverride
-		}
-		if attempt != 0 && identity != endpoint+accountID {
-			return errors.New("Codex account changed during refresh")
-		}
-		identity = endpoint + accountID
-		req, e := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		if e != nil {
-			return e
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "text/event-stream")
-		req.Header.Set("User-Agent", "Codex-Tunnel")
-		if accountID != "" {
-			req.Header.Set("ChatGPT-Account-Id", accountID)
-			req.Header.Set("originator", "desk_tunnel")
-			if region != "NO_CONSTRAINT" {
-				req.Header.Set("x-openai-account-routing-override", region)
-			}
-		}
-		start := time.Now()
-		resp, e := client.Do(req)
-		if e == nil {
-			e = out.read(resp)
-			resp.Body.Close()
-		}
-		recordHop(ctx, "POST", req.URL.Path, start, e)
-		if attempt == 0 && accountID != "" && resp != nil && resp.StatusCode == 401 {
-			continue
-		}
-		return e
-	}
-	return errors.New("Codex account refresh failed")
+func strictOption(v json.RawMessage, dest any) error {
+	d := json.NewDecoder(bytes.NewReader(v))
+	d.DisallowUnknownFields()
+	return d.Decode(dest)
 }
 
-func (r runner) responsesAPIKey() string {
-	f, e := os.Open(filepath.Join(r.home, "auth.json"))
-	if e == nil {
-		defer f.Close()
-		var auth struct {
-			Mode string `json:"auth_mode"`
-			Key  string `json:"OPENAI_API_KEY"`
+func (b *responsesRequest) parseTools(f responseFields) error {
+	type definition struct {
+		Type, Name, Description string
+		Parameters              json.RawMessage
+		Strict                  *bool
+	}
+	var tools []definition
+	if raw := f["tools"]; len(raw) != 0 && strictOption(raw, &tools) != nil {
+		return invalidResponse("tools must be an array of function definitions")
+	}
+	names := map[string]bool{}
+	for _, tool := range tools {
+		if tool.Type != "function" || !responseFieldName.MatchString(tool.Name) || names[tool.Name] || tool.Strict != nil && *tool.Strict {
+			return invalidResponse("The CLI adapter supports uniquely named, non-strict function tools")
 		}
-		if json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&auth) == nil && (auth.Mode == "apikey" || auth.Mode == "") && auth.Key != "" {
-			return auth.Key
+		names[tool.Name] = true
+		if tool.Parameters == nil {
+			tool.Parameters = rawJSON(M{"type": "object", "properties": M{}})
+		}
+		if tool.Parameters[0] != '{' {
+			return invalidResponse("function parameters must be a JSON Schema object")
+		}
+		b.options.tools = append(b.options.tools, M{"type": "function", "name": tool.Name, "description": tool.Description, "inputSchema": tool.Parameters})
+	}
+	if raw := f["tool_choice"]; len(raw) != 0 {
+		var choice string
+		if json.Unmarshal(raw, &choice) != nil || choice != "auto" && choice != "none" {
+			return invalidResponse("The CLI adapter supports tool_choice auto and none")
+		}
+		if choice == "none" {
+			b.options.tools = nil
 		}
 	}
-	for _, k := range []string{"CODEX_API_KEY", "OPENAI_API_KEY"} {
-		if v := os.Getenv(k); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func responseRejection(resp *http.Response) error {
-	var envelope struct {
-		Error  struct{ Code, Type, Param string }
-		Detail string
-	}
-	_ = json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&envelope)
-	code := envelope.Error.Code
-	if !imageErrorCode.MatchString(code) {
-		code = envelope.Error.Type
-	}
-	if !imageErrorCode.MatchString(code) {
-		code = "responses_provider_error"
-	}
-	status := resp.StatusCode
-	switch status {
-	case 400, 403, 404, 408, 409, 413, 422, 429, 500, 502, 503, 504:
-	default:
-		status = 502
-	}
-	msg := fmt.Sprintf("Responses upstream returned HTTP %d", resp.StatusCode)
-	if imageErrorCode.MatchString(envelope.Error.Param) {
-		msg += " for " + envelope.Error.Param
-	}
-	return &responsesError{status, code, msg}
+	return nil
 }

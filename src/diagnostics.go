@@ -382,12 +382,5 @@ func errorStatus(ctx context.Context, err error) int {
 	if errors.As(err, &re) {
 		return re.status
 	}
-	var provider *imageProviderError
-	if errors.As(err, &provider) {
-		switch provider.status {
-		case 400, 403, 404, 409, 413, 422, 429, 503:
-			return provider.status
-		}
-	}
 	return 502
 }
