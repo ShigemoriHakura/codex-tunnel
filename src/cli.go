@@ -244,15 +244,15 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 	retire := false
 	defer func() { servers.release(p, retire || errors.Is(err, errUnconfirmedRPC)) }()
 	if t.image {
-		if p.version == "0.170.0" {
+		switch p.version {
+		case "0.170.0", "0.171.0":
 			res.imageModel = pinnedImageModel
 		}
 		if t.imageModel != "" && t.imageModel != res.imageModel {
 			return res, &responsesError{400, "invalid_image_option", "Cannot verify the requested image engine with this CLI version"}
 		}
-		// Provider capability and credential type are independent in 0.170.0.
-		// Its image tool is not registered for standard API-key authentication.
-		if p.version == "0.170.0" {
+		// Both verified releases also gate their built-in tool on the login type.
+		if res.imageModel == pinnedImageModel {
 			raw, err := p.call(ctx, "account/read", M{"refreshToken": false})
 			if err != nil {
 				return res, err
@@ -262,7 +262,7 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 				return res, err
 			}
 			if login.Account != nil && login.Account.Type == "apiKey" {
-				return res, &responsesError{503, "image_tool_unavailable", "Codex CLI 0.170.0 does not expose its built-in image tool with a standard API-key login"}
+				return res, &responsesError{503, "image_tool_unavailable", "Codex CLI " + p.version + " does not expose its built-in image tool with a standard API-key login"}
 			}
 		}
 		raw, err := p.call(ctx, "modelProvider/capabilities/read", M{})

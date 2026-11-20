@@ -192,6 +192,10 @@ func TestCLIIntegration(t *testing.T) {
 			return
 		}
 		if r.URL.Path == "/v1/images/generations" {
+			var req struct{ Model string }
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Model != "gpt-image-2" {
+				t.Errorf("unexpected CLI image engine %q: %v", req.Model, err)
+			}
 			jsonOut(w, 200, M{"created": 1, "data": []M{{"b64_json": png}}})
 			return
 		}

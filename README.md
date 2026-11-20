@@ -16,7 +16,7 @@ docker compose exec gateway codex -c 'cli_auth_credentials_store="file"' login s
 
 打开 `http://127.0.0.1:56439`，用 `.env` 中的 `ADMIN_TOKEN` 登录。到 **访问密钥 → 创建密钥**，立即复制一次性显示的 `dt_…`。SDK 的 `base_url` 使用 `http://127.0.0.1:56439/v1`，`api_key` 使用此客户端密钥，**不是**管理员令牌或上游凭据。更改 `.env` 后通过 `docker compose up -d` 重建容器配置。
 
-已有 Codex 登录的实例可以直接沿用。远端客户端使用网关的 `dt_` 密钥，文本、看图和生图请求均由服务器上的 Codex CLI app-server 执行。若已在 CLI 中使用 API Key 登录，聊天仍使用该登录。0.170.0 版 CLI 对普通 API Key 不提供内置生图工具，网关会在开始推理前返回 `image_tool_unavailable`。
+已有 Codex 登录的实例可以直接沿用。远端客户端使用网关的 `dt_` 密钥，文本、看图和生图请求均由服务器上的 Codex CLI app-server 执行。若已在 CLI 中使用 API Key 登录，聊天仍使用该登录。0.170.0 和 0.171.0 版 CLI 对普通 API Key 不提供内置生图工具，网关会在开始推理前返回 `image_tool_unavailable`。
 
 此部署用于从自己的设备操作服务器上的 Codex。CLI 的调用方式不会改变账户的授权范围。通过 Sign in with ChatGPT 接入应用时，套餐授权仅限所连接的应用，不能用来为其他工具提供通用 API。[OpenAI 授权条款 §3.1](https://openai.com/policies/sign-in-with-chatgpt-terms/)
 
@@ -123,7 +123,7 @@ curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
 | `GET /v1/models` | 从 CLI `model/list` 分页拉取，不硬编码模型 |
 | `POST /v1/chat/completions` | 文本、图片输入与 SSE；支持 `model`、`messages`、`stream`、`stream_options.include_usage` |
 | `POST /v1/responses` | 创建 Responses 对象。支持 JSON、SSE、文本、内联图片、客户端工具调用和连续对话。 |
-| `POST /v1/images/generations` | 通过原生 CLI 工具生成一张图片。省略 `model` 或提供 Codex 对话模型时，由 CLI 选择图像引擎。在 0.170.0 可精确指定 `gpt-image-2`。`gpt-image-2.5-sunburst`、固定尺寸或非自动质量会返回 400。支持 PNG、JPEG、WebP 和 JPEG/WebP 的 `output_compression`。`stream:true` 发送保活和最终的 `image_generation.completed`，`partial_images` 只能为 0。 |
+| `POST /v1/images/generations` | 通过原生 CLI 工具生成一张图片。省略 `model` 或提供 Codex 对话模型时，由 CLI 选择图像引擎。在 0.170.0 和 0.171.0 可精确指定 `gpt-image-2`。`gpt-image-2.5-sunburst`、固定尺寸或非自动质量会返回 400。支持 PNG、JPEG、WebP 和 JPEG/WebP 的 `output_compression`。`stream:true` 发送保活和最终的 `image_generation.completed`，`partial_images` 只能为 0。 |
 | `POST /v1/sessions` | `name`、`model` 都可省略，发送 `{}` 即可 |
 | `GET /v1/sessions` | 本密钥会话，`?offset=100` 翻页，每页最多 100 条 |
 | `GET /v1/sessions/{id}/history` | 从新到旧读取对话轮次，每页 10 轮，用 `next_cursor` 作为下一页的 `cursor` |

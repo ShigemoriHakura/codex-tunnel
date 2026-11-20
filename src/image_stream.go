@@ -10,7 +10,7 @@ import (
 
 const (
 	imageCompleted   = "image_generation.completed"
-	pinnedImageModel = "gpt-image-2" // Engine in Codex CLI 0.170.0's image-generation extension.
+	pinnedImageModel = "gpt-image-2"
 )
 
 func isImageEngine(model string) bool {
@@ -21,7 +21,7 @@ func isImageEngine(model string) bool {
 func (b imageRequest) cliOptions() error {
 	switch {
 	case isImageEngine(b.Model) && b.Model != pinnedImageModel:
-		return errors.New("The CLI cannot select the requested image engine. Use gpt-image-2 with CLI 0.170.0, omit model, or supply a Codex conversation model")
+		return errors.New("The CLI cannot select the requested image engine. Use " + pinnedImageModel + ", omit model, or supply a Codex conversation model")
 	case b.PartialImages != nil && *b.PartialImages != 0:
 		return errors.New("The CLI image tool returns a completed image only. Omit partial_images or set it to 0")
 	case b.Size != "" && b.Size != "auto":

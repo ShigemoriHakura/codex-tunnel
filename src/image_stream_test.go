@@ -37,13 +37,12 @@ func TestImageHeartbeatCancelsFailedDelivery(t *testing.T) {
 	}
 }
 
-// Supply a CLI peer with a project login and the image capability. The real-CLI
-// integration suite separately exercises providers that return only text.
+// Verify explicit image model selection and encoding for JSON and SSE clients.
 func TestCLIImageEvents(t *testing.T) {
 	a := testApp(t, t.TempDir())
 	key, _ := newKey(t, a)
 	peer := &appServer{
-		config: serverConfig{runner: a.base}, image: true, ctx: a.servers.ctx,
+		config: serverConfig{runner: a.base}, image: true, version: "0.171.0", ctx: a.servers.ctx,
 		ready: make(chan struct{}), writes: make(chan M), denials: make(chan M),
 		pending: make(map[uint64]chan packet), threads: make(map[string]*turnInbox),
 	}
@@ -61,7 +60,7 @@ func TestCLIImageEvents(t *testing.T) {
 				reply := M{}
 				switch frame["method"] {
 				case "account/read":
-					reply = M{"account": M{"type": "apiKey"}}
+					reply = M{"account": M{"type": "chatgpt"}}
 				case "modelProvider/capabilities/read":
 					reply = M{"imageGeneration": true}
 				case "thread/start":
@@ -90,9 +89,10 @@ func TestCLIImageEvents(t *testing.T) {
 		}
 	}()
 	for _, stream := range []bool{false, true} {
-		body := hit(t, a, "POST", "/v1/images/generations", key, string(rawJSON(M{"prompt": "draw", "stream": stream, "output_format": "webp"})), "", 200)
+		body := hit(t, a, "POST", "/v1/images/generations", key, string(rawJSON(M{"model": "gpt-image-2", "prompt": "draw", "stream": stream, "output_format": "webp"})), "", 200)
 		var obj struct {
 			Type  string
+			Model string
 			Size  string
 			Bytes []byte `json:"b64_json"`
 			Data  []struct {
@@ -103,6 +103,9 @@ func TestCLIImageEvents(t *testing.T) {
 			_, body, _ = strings.Cut(body, "data: ")
 		}
 		decode(t, body, &obj)
+		if obj.Model != "gpt-image-2" {
+			t.Fatalf("unexpected image model %q", obj.Model)
+		}
 		data := obj.Bytes
 		if stream {
 			if obj.Type != imageCompleted || obj.Size != "1x1" {
