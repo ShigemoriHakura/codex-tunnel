@@ -144,6 +144,18 @@ curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
 
 客户端可以发送标准 `include` 选择器，例如 `["reasoning.encrypted_content"]`。当前网关使用的 app-server 事件提供回答文本和用量。对于加密推理内容、逐词元对数概率等无法返回的附加字段，网关在 HTTP 响应头 `X-Codex-Tunnel-Omitted-Include` 中列出对应选择器，JSON 和 SSE 遵循相同规则。使用 `store:false` 的无状态客户端需自行回传可见对话历史，也可以绑定网关会话续聊。
 
+网关接受客户端随请求发送的 `client_metadata`（JSON 对象）和 `prompt_cache_key`（字符串），两者均可省略或设为 `null`。这两个字段仅在入口校验。上游线程标识、轮次标识和缓存键由运行在网关的 Codex CLI 管理。跨请求续聊使用 `previous_response_id`、`X-Session-ID` 或密钥绑定会话。
+
+**Codex 桌面端自定义提供方。** 保留现有网关地址、模型和密钥配置。Codex 0.171.0 默认还会发送推理摘要选项、命名空间工具和托管网页搜索声明；当前适配器支持文本和普通非严格函数。可在使用此网关的受信任项目的 `.codex/config.toml` 中合并以下设置，适用于该项目的新会话。[Codex 配置说明](https://learn.chatgpt.com/docs/config-file/config-basic)
+
+```toml
+model_reasoning_summary = "none"
+web_search = "disabled"
+
+[agents]
+enabled = false
+```
+
 客户端可以声明非严格模式函数。网关每轮最多返回一个函数调用，并在 JSON 和 SSE 响应中标明 `"parallel_tool_calls": false`。客户端可省略此参数，也可发送 `false`、`true` 或 `null`，均按单工具模式处理。此设置作用于网关与客户端之间。Codex CLI 自行构造上游模型请求。将函数结果连同对应的 `call_id` 回传后，模型可以继续回答或请求下一个函数。未实现的参数、工具类型和强制工具选择会在请求校验时返回 400。
 
 使用同一密钥传入 `previous_response_id` 可以续聊或从先前的一轮分支。网关默认在本机 SQLite 保存该轮输入及输出以供续聊，独立响应 ID 的有效期为 30 天。`store:false` 关闭按响应 ID 续聊。显式会话和密钥绑定会话会保留对话，后续请求可直接发送新输入。同一会话可以混用 Responses 与 Chat Completions，沿用原有模型、并发队列、用量统计和保活设置。后台任务、托管文件和 WebSocket 传输暂未提供。

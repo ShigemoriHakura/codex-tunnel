@@ -51,6 +51,30 @@ func TestResponsesIncludeValidation(t *testing.T) {
 	}
 }
 
+func TestResponsesClientMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		fields string
+		valid  bool
+	}{
+		{`"client_metadata":{"thread_id":"client-thread","x-codex-turn-metadata":"{\"turn_id\":\"client-turn\"}"},"prompt_cache_key":"client-cache"`, true},
+		{`"client_metadata":{},"prompt_cache_key":null`, true},
+		{`"client_metadata":null`, true},
+		{`"client_metadata":"client-thread"`, false},
+		{`"client_metadata":[]`, false},
+		{`"prompt_cache_key":{}`, false},
+		{`"unknown_client_field":{}`, false},
+	} {
+		var fields responseFields
+		if err := json.Unmarshal([]byte(`{"model":"fixture","input":"x",`+tc.fields+"}"), &fields); err != nil {
+			t.Fatal(err)
+		}
+		_, err := parseResponses(fields)
+		if tc.valid != (err == nil) {
+			t.Errorf("%s: %v", tc.fields, err)
+		}
+	}
+}
+
 func TestResponsesCLI(t *testing.T) {
 	if os.Getenv("TEST_CODEX_BIN") == "" {
 		t.Skip("requires the pinned CLI")
@@ -63,6 +87,7 @@ func TestResponsesCLI(t *testing.T) {
 	t.Setenv("NO_PROXY", "127.0.0.1,localhost")
 	a := testApp(t, t.TempDir())
 	var requests atomic.Int32
+	const externalID = "private-fixture-client-id"
 	mockAccount := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" || r.Method != "POST" || r.Header.Get("Authorization") != "Bearer sk-loopback-only" {
 			t.Errorf("unexpected CLI request %s %s", r.Method, r.URL.Path)
@@ -71,12 +96,14 @@ func TestResponsesCLI(t *testing.T) {
 		}
 		requests.Add(1)
 		var b struct {
-			Input         responseItems
-			Store, Stream bool
-			Model         string
-			Instructions  string
-			Tools         []json.RawMessage
-			Previous      string `json:"previous_response_id"`
+			Input          responseItems
+			Store, Stream  bool
+			Model          string
+			Instructions   string
+			Tools          []json.RawMessage
+			Previous       string            `json:"previous_response_id"`
+			ClientMetadata map[string]string `json:"client_metadata"`
+			PromptCacheKey string            `json:"prompt_cache_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
 			t.Error(err)
@@ -87,6 +114,12 @@ func TestResponsesCLI(t *testing.T) {
 		}
 		latest := string(b.Input[len(b.Input)-1])
 		full := string(rawJSON(b.Input))
+		if strings.Contains(string(rawJSON(b)), externalID) {
+			t.Error("external client metadata reached the CLI provider")
+		}
+		if strings.Contains(latest, "fixture-includes") && b.ClientMetadata["thread_id"] == "" {
+			t.Error("missing CLI-generated upstream thread identity")
+		}
 		if strings.Contains(latest, "fixture-followup") && (!strings.Contains(full, "fixture-first") || !strings.Contains(full, "fixture-answer")) {
 			t.Errorf("missing session history")
 		}
@@ -166,7 +199,8 @@ func TestResponsesCLI(t *testing.T) {
 	if !strings.HasPrefix(id, "resp_") || !strings.Contains(first, "fixture-call-id") {
 		t.Fatal(first)
 	}
-	payload := string(rawJSON(M{"model": "gpt-5.4", "previous_response_id": id, "input": []M{{"type": "function_call_output", "call_id": "fixture-call-id", "output": "fixture-tool-output"}}, "stream": true}))
+	externalMetadata := M{"thread_id": externalID, "session_id": externalID, "x-codex-turn-metadata": string(rawJSON(M{"turn_id": externalID}))}
+	payload := string(rawJSON(M{"model": "gpt-5.4", "previous_response_id": id, "input": []M{{"type": "function_call_output", "call_id": "fixture-call-id", "output": "fixture-tool-output"}}, "stream": true, "client_metadata": externalMetadata}))
 	hit(t, a, "POST", path, other, payload, "", 404)
 	sse := hit(t, a, "POST", path, key, payload, "", 200)
 	if !strings.Contains(sse, "event: response.output_text.delta") || strings.Count(sse, "event: response.completed") != 1 || strings.Contains(sse, "[DONE]") {
@@ -192,6 +226,7 @@ func TestResponsesCLI(t *testing.T) {
 	t.Run("optional include fields", func(t *testing.T) {
 		for _, stream := range []bool{false, true} {
 			fields := M{"model": "gpt-5.4", "input": "fixture-includes", "store": false, "stream": stream, "parallel_tool_calls": true,
+				"client_metadata": externalMetadata, "prompt_cache_key": externalID,
 				"include": []string{"reasoning.encrypted_content", "message.output_text.logprobs", "reasoning.encrypted_content"}}
 			req := httptest.NewRequest("POST", path, bytes.NewReader(rawJSON(fields)))
 			req.Header.Set("Authorization", "Bearer "+other)

@@ -46,6 +46,17 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 				return nil, invalidResponse("Invalid model")
 			}
 		case "input":
+		case "client_metadata":
+			// This belongs to the client-to-gateway hop. The CLI builds its own
+			// metadata for the authenticated upstream thread and turn.
+			if !bytes.Equal(v, []byte("null")) && (len(v) == 0 || v[0] != '{') {
+				return nil, invalidResponse("client_metadata must be an object or null")
+			}
+		case "prompt_cache_key":
+			// The CLI also chooses its upstream cache key for that thread.
+			if !bytes.Equal(v, []byte("null")) && (len(v) == 0 || v[0] != '"') {
+				return nil, invalidResponse("prompt_cache_key must be a string or null")
+			}
 		case "instructions":
 			if json.Unmarshal(v, &b.options.instructions) != nil {
 				return nil, invalidResponse("instructions must be a string")
