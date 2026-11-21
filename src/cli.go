@@ -497,11 +497,32 @@ type cliTurnError struct {
 	Message string
 }
 
-func (e cliTurnError) isCyberPolicy() bool { return string(e.Info) == `"cyberPolicy"` }
+type providerErrorDetail struct{ Code, Type, Param, Message string }
+
+// Some upstream HTTP and WebSocket errors arrive as "other", with the
+// provider's JSON error envelope in TurnError.message. Never expose its body.
+func (e cliTurnError) providerError() providerErrorDetail {
+	var envelope struct{ Error providerErrorDetail }
+	if json.Unmarshal([]byte(e.Message), &envelope) != nil {
+		return providerErrorDetail{}
+	}
+	return envelope.Error
+}
+
+func (e cliTurnError) isCyberPolicy() bool {
+	return string(e.Info) == `"cyberPolicy"` || e.providerError().Code == "cyber_policy"
+}
 
 func cliTurnFailure(status string, detail cliTurnError) error {
 	if detail.isCyberPolicy() {
 		return errCyberPolicy
+	}
+	provider := detail.providerError()
+	if (string(detail.Info) == `"other"` || len(detail.Info) == 0 || string(detail.Info) == "null") && provider.Type == "invalid_request_error" {
+		if provider.Code == "unsupported_parameter" && provider.Param == "input" && provider.Message == "This request does not support user-supplied input item IDs." {
+			return invalidResponse("The provider rejected a supplied input item ID in the replayed history")
+		}
+		return invalidResponse("The CLI provider rejected the request parameters")
 	}
 	var transport map[string]struct {
 		Status int `json:"httpStatusCode"`
@@ -509,9 +530,6 @@ func cliTurnFailure(status string, detail cliTurnError) error {
 	_ = json.Unmarshal(detail.Info, &transport)
 	for _, kind := range []string{"httpConnectionFailed", "responseStreamConnectionFailed", "responseStreamDisconnected", "responseTooManyFailedAttempts"} {
 		if transport[kind].Status == 400 {
-			if strings.Contains(detail.Message, "This request does not support user-supplied input item IDs.") {
-				return invalidResponse("The provider rejected a supplied input item ID in the replayed history")
-			}
 			return invalidResponse("The CLI provider rejected the request (HTTP 400)")
 		}
 	}
