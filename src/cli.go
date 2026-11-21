@@ -233,7 +233,7 @@ type turn struct {
 	verbosity      string
 	outputSchema   json.RawMessage
 	tools          []M
-	clientTools    map[clientToolName]clientToolName
+	clientTools    map[clientToolName]clientTool
 	webSearch      string
 	onWebSearch    func(string, bool, json.RawMessage, string, json.RawMessage) error
 	onTool         func(string, string, string, json.RawMessage) error

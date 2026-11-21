@@ -142,7 +142,7 @@ curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
 
 省略 `stream` 返回一个包含 `output` 与 `usage` 的 JSON 对象。流式调用返回具名 SSE 事件，如 `response.output_text.delta`、`response.output_item.done` 和 `response.completed`。输入支持字符串、带角色的消息数组、内联 Base64 图片，以及与 `call_id` 匹配的 `function_call_output`。支持 `instructions`、`reasoning.effort` 和 `text.format` 的文本或 JSON Schema 输出。
 
-支持回答详略设置的模型可使用 `text.verbosity` 指定 `low`、`medium` 或 `high`，可与 `text.format` 同时使用。
+支持回答详略设置的模型可使用 `text.verbosity` 指定 `low`、`medium` 或 `high`，可与 `text.format` 同时使用。桌面端可发送 `reasoning.context: "all_turns"`，网关侧的 CLI 会根据模型能力选择上游推理上下文模式。
 
 桌面端可直接发送 `"reasoning":{"summary":"auto"}`，也可选 `concise`、`detailed` 或 `none`。当模型提供公开摘要时，JSON 的 `output` 中会包含带 `summary_text` 段落的 `reasoning` 项，流式客户端可读取 `response.reasoning_summary_text.delta`。最终回答仍在 `message` 项中。
 
@@ -150,7 +150,9 @@ curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
 
 网关接受客户端随请求发送的 `client_metadata`（JSON 对象）和 `prompt_cache_key`（字符串），两者均可省略或设为 `null`。这两个字段仅在入口校验。上游线程标识、轮次标识和缓存键由运行在网关的 Codex CLI 管理。跨请求续聊使用 `previous_response_id`、`X-Session-ID` 或密钥绑定会话。
 
-Codex 桌面端使用自定义 Responses 提供方时，可以沿用默认的代理和网页搜索设置。一次请求可同时声明普通函数（`function`）、包含多个函数的命名空间（`namespace`）和托管网页搜索（`web_search`）。客户端函数在发起请求的客户端执行。网关在 JSON、流式事件和续聊历史中保留原始函数名、命名空间和 `call_id`，不同命名空间可以使用相同的函数名。
+Codex 桌面端使用自定义 Responses 提供方时，可以沿用默认的代理和网页搜索设置。一次请求可同时声明普通函数（`function`）、自定义文本工具（`custom`）、命名空间（`namespace`）和托管网页搜索（`web_search`）。客户端函数在发起请求的客户端执行。网关在 JSON、流式事件和续聊历史中保留原始函数名、命名空间和 `call_id`，不同命名空间可以使用相同的函数名。对于使用 Responses Lite 的桌面端，网关也会从开发者角色的 `additional_tools` 输入项读取工具声明。
+
+自定义文本工具通过 app-server 动态函数传递原始输入，支持文本、Lark 和正则格式声明。网关将语法定义提供给模型，返回 `custom_tool_call`，由客户端校验并执行，再通过 `custom_tool_call_output` 回传结果。
 
 网页搜索由网关侧的 Codex app-server 执行。`external_web_access: false` 使用缓存，`true` 使用实时搜索。`web_search_call` 输出项记录 CLI 报告的搜索操作，`include: ["web_search_call.results"]` 可请求 CLI 提供的结果。未声明网页搜索或指定 `tool_choice: "none"` 时，该轮关闭网页搜索。
 

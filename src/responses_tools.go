@@ -13,6 +13,11 @@ import (
 
 type clientToolName struct{ Namespace, Name string }
 
+type clientTool struct {
+	clientToolName
+	custom bool
+}
+
 var clientToolIdentifier = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // Dynamic tools share the CLI's registry with built-ins. Give client tools
@@ -45,18 +50,53 @@ func toolOption(raw json.RawMessage, path string, dst any) error {
 	return nil
 }
 
-func (t *turn) clientFunction(raw json.RawMessage, ns, path string) (M, error) {
-	var f struct {
-		Type, Name, Description string
-		Parameters              json.RawMessage
-		Strict                  bool
-		Deferred                bool `json:"defer_loading"`
+type clientFunctionSpec struct {
+	Type, Name, Description string
+	Parameters              json.RawMessage
+	Strict                  bool
+	Deferred                bool `json:"defer_loading"`
+}
+
+func (t *turn) clientCallable(raw json.RawMessage, ns, path string) (M, error) {
+	var kind struct{ Type string }
+	if json.Unmarshal(raw, &kind) != nil {
+		return nil, invalidResponse("Invalid tool declaration at " + path)
 	}
-	if err := toolOption(raw, path, &f); err != nil {
-		return nil, err
+	var f clientFunctionSpec
+	switch kind.Type {
+	case "function":
+		if err := toolOption(raw, path, &f); err != nil {
+			return nil, err
+		}
+	case "custom":
+		var c struct {
+			Type, Name, Description string
+			Deferred                bool `json:"defer_loading"`
+			Format                  *struct{ Type, Syntax, Definition string }
+		}
+		if err := toolOption(raw, path, &c); err != nil {
+			return nil, err
+		}
+		input := M{"type": "string"}
+		if g := c.Format; g != nil {
+			switch g.Type {
+			case "text":
+			case "grammar":
+				if (g.Syntax != "lark" && g.Syntax != "regex") || g.Definition == "" {
+					return nil, invalidResponse(path + ".format requires a lark or regex grammar definition")
+				}
+				input["description"] = "The raw tool input must match this " + g.Syntax + " grammar:\n" + g.Definition
+			default:
+				return nil, invalidResponse(path + ".format must use text or grammar")
+			}
+		}
+		f = clientFunctionSpec{Name: c.Name, Description: c.Description, Deferred: c.Deferred,
+			Parameters: rawJSON(M{"type": "object", "properties": M{"input": input}, "required": []string{"input"}, "additionalProperties": false})}
+	default:
+		return nil, invalidResponse(path + " must be a function or custom tool")
 	}
-	if f.Type != "function" || len(f.Name) > 128 || !clientToolIdentifier.MatchString(f.Name) {
-		return nil, invalidResponse(path + " must be a named function")
+	if len(f.Name) > 128 || !clientToolIdentifier.MatchString(f.Name) {
+		return nil, invalidResponse(path + " requires a valid tool name")
 	}
 	if f.Strict {
 		return nil, invalidResponse(path + ".strict=true is unavailable for CLI dynamic tools")
@@ -75,7 +115,7 @@ func (t *turn) clientFunction(raw json.RawMessage, ns, path string) (M, error) {
 	if _, exists := t.clientTools[native]; exists {
 		return nil, invalidResponse("Duplicate function at " + path)
 	}
-	t.clientTools[native] = name
+	t.clientTools[native] = clientTool{name, kind.Type == "custom"}
 	spec := M{"type": "function", "name": native.Name, "description": f.Description, "inputSchema": f.Parameters}
 	if f.Deferred {
 		spec["deferLoading"] = true
@@ -92,14 +132,14 @@ func (t *turn) clientNamespace(raw json.RawMessage, path string) (M, error) {
 		return nil, err
 	}
 	if !clientToolIdentifier.MatchString(ns.Name) || len(ns.Name) > 64 || len(ns.Tools) == 0 {
-		return nil, invalidResponse(path + " requires a namespace name and a nonempty array of functions")
+		return nil, invalidResponse(path + " requires a namespace name and a nonempty array of tools")
 	}
 	if len([]rune(ns.Description)) > 1024 {
 		return nil, invalidResponse(path + ".description exceeds the CLI namespace limit of 1024 characters")
 	}
 	children := make([]M, 0, len(ns.Tools))
 	for i, child := range ns.Tools {
-		f, err := t.clientFunction(child, ns.Name, fmt.Sprintf("%s.tools[%d]", path, i))
+		f, err := t.clientCallable(child, ns.Name, fmt.Sprintf("%s.tools[%d]", path, i))
 		if err != nil {
 			return nil, err
 		}
@@ -108,15 +148,15 @@ func (t *turn) clientNamespace(raw json.RawMessage, path string) (M, error) {
 	return M{"type": "namespace", "name": nativeToolIdentifier(ns.Name, 64), "description": ns.Description, "tools": children}, nil
 }
 
-func (b *responsesRequest) parseTools(f responseFields) error {
+func (b *responsesRequest) parseTools(f responseFields, additional []json.RawMessage) error {
 	var tools []json.RawMessage
 	if raw := f["tools"]; len(raw) > 0 && json.Unmarshal(raw, &tools) != nil {
 		return invalidResponse("tools must be an array of tool declarations")
 	}
 	t := &b.options
-	t.clientTools = make(map[clientToolName]clientToolName)
+	t.clientTools = make(map[clientToolName]clientTool)
 	names := map[string]bool{}
-	for i, raw := range tools {
+	for i, raw := range append(tools, additional...) {
 		path := fmt.Sprintf("tools[%d]", i)
 		var kind struct{ Type, Name string }
 		if json.Unmarshal(raw, &kind) != nil || !responseFieldName.MatchString(kind.Type) {
@@ -125,8 +165,8 @@ func (b *responsesRequest) parseTools(f responseFields) error {
 		var spec M
 		var err error
 		switch kind.Type {
-		case "function":
-			spec, err = t.clientFunction(raw, "", path)
+		case "function", "custom":
+			spec, err = t.clientCallable(raw, "", path)
 		case "namespace":
 			spec, err = t.clientNamespace(raw, path)
 		case "web_search":
@@ -188,7 +228,7 @@ func nativeToolHistory(items responseItems) (responseItems, error) {
 		if err := json.Unmarshal(raw, &call); err != nil {
 			return nil, err
 		}
-		if call.Type != "function_call" {
+		if call.Type != "function_call" && call.Type != "custom_tool_call" && call.Type != "custom_tool_call_output" {
 			continue
 		}
 		if history == nil {
@@ -197,6 +237,15 @@ func nativeToolHistory(items responseItems) (responseItems, error) {
 		var item responseFields
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return nil, err
+		}
+		switch call.Type {
+		case "custom_tool_call_output":
+			history[i] = rawJSON(responseFields{"type": rawJSON("function_call_output"), "call_id": item["call_id"], "output": item["output"]})
+			continue
+		case "custom_tool_call":
+			item["type"] = rawJSON("function_call")
+			item["arguments"] = rawJSON(string(rawJSON(responseFields{"input": item["input"]})))
+			delete(item, "input")
 		}
 		native := (clientToolName{call.Namespace, call.Name}).native()
 		item["name"] = rawJSON(native.Name)

@@ -37,7 +37,7 @@ func TestResponsesParallelToolCallsOption(t *testing.T) {
 func TestResponsesToolDeclarations(t *testing.T) {
 	for _, tc := range []struct{ declarations, problem string }{
 		{`{"type":"function"}`, "array"},
-		{`[{"type":"custom"}]`, "custom at tools[0]"},
+		{`[{"type":"file_search"}]`, "file_search at tools[0]"},
 		{`[{"type":"function","name":"lookup"},{"type":"function","name":"lookup"}]`, "Duplicate function at tools[1]"},
 		{`[{"type":"namespace","name":"tasks","tools":[{"type":"function","name":"lookup","parameters":false}]}]`, "tools[0].tools[0].parameters"},
 		{`[{"type":"web_search","unknown_toggle":true}]`, "tools[0].unknown_toggle"},
@@ -123,13 +123,13 @@ func TestResponsesClientMetadata(t *testing.T) {
 func TestResponsesReasoningOptions(t *testing.T) {
 	for _, mode := range []string{"auto", "concise", "detailed", "none"} {
 		for _, field := range []string{"summary", "generate_summary"} {
-			req, err := parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON("x"), "reasoning": rawJSON(M{"effort": "high", field: mode})})
+			req, err := parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON("x"), "reasoning": rawJSON(M{"effort": "high", "context": "all_turns", field: mode})})
 			if err != nil || req.options.summary != mode || req.options.effort != "high" {
 				t.Fatalf("%s=%s: %v", field, mode, err)
 			}
 		}
 	}
-	for _, raw := range []string{`{"summary":false}`, `{"summary":""}`, `{"summary":"verbose"}`, `{"summary":"auto","generate_summary":"concise"}`, `{"other":true}`} {
+	for _, raw := range []string{`{"summary":false}`, `{"summary":""}`, `{"summary":"verbose"}`, `{"summary":"auto","generate_summary":"concise"}`, `{"context":"invalid"}`, `{"other":true}`} {
 		if _, err := parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON("x"), "reasoning": json.RawMessage(raw)}); err == nil {
 			t.Errorf("accepted invalid reasoning %s", raw)
 		}
@@ -195,6 +195,28 @@ func TestResponsesCLI(t *testing.T) {
 		event := func(typ string, v M) { v["type"] = typ; fmt.Fprintf(&s, "event: %s\ndata: %s\n\n", typ, rawJSON(v)) }
 		event("response.created", M{"response": M{"id": "upstream", "status": "in_progress"}})
 		var calls []M
+		if strings.Contains(latest, "fixture-client-custom") {
+			specs := string(rawJSON(b.Tools))
+			if !strings.Contains(specs, `"name":"ct_scripts"`) || !strings.Contains(specs, "fixture-grammar") || !strings.Contains(specs, `"name":"ct_lookup"`) {
+				t.Error("missing merged custom tool grammar or top-level function")
+			}
+			calls = append(calls, M{"type": "function_call", "id": "fc_custom", "call_id": "call_custom", "namespace": "ct_scripts", "name": "ct_echo", "arguments": string(rawJSON(M{"input": "a\n\"b\""}))})
+		}
+		if strings.Contains(latest, "fixture-custom-result") {
+			var call struct{ Type, Namespace, Name, Arguments string }
+			found := false
+			for _, item := range b.Input {
+				if prop(string(item), "call_id") == "call_custom" && prop(string(item), "type") == "function_call" {
+					if err := json.Unmarshal(item, &call); err != nil {
+						t.Error(err)
+					}
+					found = call.Namespace == "ct_scripts" && call.Name == "ct_echo" && prop(call.Arguments, "input") == "a\n\"b\""
+				}
+			}
+			if !found || !strings.Contains(latest, `"type":"function_call_output"`) {
+				t.Error("custom tool continuation lost input or output")
+			}
+		}
 		if strings.Contains(latest, "fixture-desktop-") {
 			specs := string(rawJSON(b.Tools))
 			switch {
@@ -353,6 +375,27 @@ func TestResponsesCLI(t *testing.T) {
 		}
 		body["input"], body["tool_choice"] = "fixture-desktop-disabled", "none"
 		hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+	})
+
+	t.Run("custom tools from Responses Lite", func(t *testing.T) {
+		def := M{"type": "custom", "name": "echo", "format": M{"type": "grammar", "syntax": "lark", "definition": `start: "fixture-grammar"`}}
+		toolsItem := M{"type": "additional_tools", "role": "developer", "tools": []M{{"type": "namespace", "name": "scripts", "tools": []M{def}}}}
+		body := M{"model": "gpt-5.4", "input": []M{toolsItem, {"role": "user", "content": "fixture-client-custom"}}, "tools": []M{{"type": "function", "name": "lookup"}}}
+		for _, stream := range []bool{false, true} {
+			body["stream"] = stream
+			wire := hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+			if !strings.Contains(wire, `"type":"custom_tool_call"`) || !strings.Contains(wire, `"namespace":"scripts"`) || !strings.Contains(wire, `"name":"echo"`) || !strings.Contains(wire, `"input":"a\n\"b\""`) {
+				t.Fatalf("missing custom tool input: %s", wire)
+			}
+			if stream {
+				if !strings.Contains(wire, "event: response.custom_tool_call_input.done") {
+					t.Fatal(wire)
+				}
+			} else {
+				followup := M{"model": "gpt-5.4", "previous_response_id": prop(wire, "id"), "input": []M{{"type": "custom_tool_call_output", "call_id": "call_custom", "output": "fixture-custom-result"}}}
+				hit(t, a, "POST", path, other, string(rawJSON(followup)), "", 200)
+			}
+		}
 	})
 
 	t.Run("public reasoning summary", func(t *testing.T) {

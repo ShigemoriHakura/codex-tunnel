@@ -65,6 +65,7 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 		case "reasoning":
 			var reasoning struct {
 				Effort          string
+				Context         *string
 				Summary         *string
 				GenerateSummary *string `json:"generate_summary"`
 			}
@@ -74,7 +75,12 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 						return nil, invalidResponse("Unsupported Responses field reasoning." + field)
 					}
 				}
-				return nil, invalidResponse("reasoning accepts effort, summary and generate_summary")
+				return nil, invalidResponse("Invalid reasoning options")
+			}
+			// The native CLI selects all_turns from its model catalog when it
+			// builds a Responses Lite request. It has no per-turn override.
+			if reasoning.Context != nil && *reasoning.Context != "all_turns" {
+				return nil, invalidResponse("reasoning.context accepts the native all_turns hint or null")
 			}
 			if reasoning.Summary == nil {
 				reasoning.Summary = reasoning.GenerateSummary
@@ -193,6 +199,7 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 	}
 	// Desktop clients can echo public summaries and hosted search activity.
 	// Only messages and client tool exchanges enter a fresh CLI thread.
+	var additional []json.RawMessage
 	replay := b.input[:0]
 	for _, v := range b.input {
 		var i struct {
@@ -251,12 +258,24 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 			// Hosted activity is displayed by the client. Its remote item ID cannot
 			// be resolved in the fresh CLI thread used for a continuation.
 			continue
-		case "function_call_output":
+		case "additional_tools":
+			var item struct{ Tools []json.RawMessage }
+			if i.Role != "developer" || json.Unmarshal(v, &item) != nil || item.Tools == nil {
+				return nil, invalidResponse("additional_tools requires the developer role and a tools array")
+			}
+			additional = append(additional, item.Tools...)
+			continue
+		case "function_call_output", "custom_tool_call_output":
 			if i.CallID == "" {
 				return nil, invalidResponse("function_call_output requires a call_id")
 			}
 			if err := validateResponseParts(i.Output); err != nil {
 				return nil, err
+			}
+		case "custom_tool_call":
+			var item struct{ Input *string }
+			if i.CallID == "" || i.Name == "" || json.Unmarshal(v, &item) != nil || item.Input == nil {
+				return nil, invalidResponse("custom_tool_call requires call_id, name and string input")
 			}
 		case "function_call":
 			if i.CallID == "" || i.Name == "" {
@@ -271,7 +290,7 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 		return nil, invalidResponse("Provide a user message or tool result with replayed display items")
 	}
 	b.input = replay
-	if err := b.parseTools(f); err != nil {
+	if err := b.parseTools(f, additional); err != nil {
 		return nil, err
 	}
 	return b, nil

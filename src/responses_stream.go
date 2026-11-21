@@ -108,7 +108,16 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 			if !ok {
 				return &responsesError{502, "unexpected_tool", "CLI requested a tool outside the client definitions"}
 			}
-			function = M{"type": "function_call", "id": id("fc_"), "call_id": callID, "name": tool.Name, "arguments": string(args), "status": "completed"}
+			function = M{"type": "function_call", "id": id("fc_"), "call_id": callID, "name": tool.Name, "status": "completed"}
+			if tool.custom {
+				var payload struct{ Input *string }
+				if strictOption(args, &payload) != nil || payload.Input == nil {
+					return &responsesError{502, "invalid_tool_input", "CLI returned invalid input for the client custom tool"}
+				}
+				function["type"], function["id"], function["input"] = "custom_tool_call", id("ctc_"), *payload.Input
+			} else {
+				function["arguments"] = string(args)
+			}
 			if tool.Namespace != "" {
 				function["namespace"] = tool.Namespace
 			}
@@ -164,17 +173,21 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 	}
 	if function != nil {
 		index := len(s.items)
-		start := M{"id": function["id"], "call_id": function["call_id"], "type": "function_call", "name": function["name"], "arguments": "", "status": "in_progress"}
+		field, event := "arguments", "response.function_call_arguments"
+		if function["type"] == "custom_tool_call" {
+			field, event = "input", "response.custom_tool_call_input"
+		}
+		start := M{"id": function["id"], "call_id": function["call_id"], "type": function["type"], "name": function["name"], field: "", "status": "in_progress"}
 		if ns, ok := function["namespace"]; ok {
 			start["namespace"] = ns
 		}
 		if err := s.send("response.output_item.added", M{"output_index": index, "item": start}); err != nil {
 			return res, err
 		}
-		if err := s.send("response.function_call_arguments.delta", M{"output_index": index, "item_id": function["id"], "delta": function["arguments"]}); err != nil {
+		if err := s.send(event+".delta", M{"output_index": index, "item_id": function["id"], "delta": function[field]}); err != nil {
 			return res, err
 		}
-		if err := s.send("response.function_call_arguments.done", M{"output_index": index, "item_id": function["id"], "name": function["name"], "arguments": function["arguments"]}); err != nil {
+		if err := s.send(event+".done", M{"output_index": index, "item_id": function["id"], "name": function["name"], field: function[field]}); err != nil {
 			return res, err
 		}
 		if err := s.send("response.output_item.done", M{"output_index": index, "item": function}); err != nil {
