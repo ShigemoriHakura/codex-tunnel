@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -23,6 +24,7 @@ type responseItems []json.RawMessage
 type responsesRequest struct {
 	options                 turn
 	input                   responseItems
+	omittedIncludes         []string
 	model, previous, parent string
 	stream, store           bool
 }
@@ -86,8 +88,25 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 			}
 		case "include":
 			var selectors []string
-			if json.Unmarshal(v, &selectors) != nil || len(selectors) > 0 {
-				return nil, invalidResponse("The CLI adapter does not expose include selectors")
+			if json.Unmarshal(v, &selectors) != nil {
+				return nil, invalidResponse("include must be an array of selector strings or null")
+			}
+			// The public app-server events used by this adapter expose none of
+			// these optional fields. Keep requests usable and report the omissions.
+			for _, selector := range selectors {
+				switch selector {
+				case "reasoning.encrypted_content", "message.output_text.logprobs", "message.input_image.image_url",
+					"web_search_call.action.sources", "web_search_call.results", "file_search_call.results",
+					"computer_call_output.output.image_url", "code_interpreter_call.outputs":
+					if !slices.Contains(b.omittedIncludes, selector) {
+						b.omittedIncludes = append(b.omittedIncludes, selector)
+					}
+				default:
+					if !responseFieldName.MatchString(selector) {
+						return nil, invalidResponse("include contains an invalid selector name")
+					}
+					return nil, invalidResponse("Unknown include selector " + selector)
+				}
 			}
 		case "stream":
 			if json.Unmarshal(v, &b.stream) != nil {

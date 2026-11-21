@@ -127,6 +127,9 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			return
 		}
 		t.model, stream = native.model, native.stream
+		if len(native.omittedIncludes) > 0 {
+			w.Header().Set("X-Codex-Tunnel-Omitted-Include", strings.Join(native.omittedIncludes, ", "))
+		}
 		if trace != nil && trace.capture {
 			trace.reqBody = preview(M{"model": t.model, "input_items": len(native.input), "stream": stream})
 		}

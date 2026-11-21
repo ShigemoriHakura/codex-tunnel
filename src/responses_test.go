@@ -34,6 +34,23 @@ func TestResponsesParallelToolCallsOption(t *testing.T) {
 	}
 }
 
+func TestResponsesIncludeValidation(t *testing.T) {
+	for _, option := range []string{
+		"null", "[]", `["reasoning.encrypted_content","reasoning.encrypted_content"]`,
+		`["web_search_call.action.sources","web_search_call.results","file_search_call.results","message.input_image.image_url","message.output_text.logprobs","computer_call_output.output.image_url","code_interpreter_call.outputs"]`,
+	} {
+		_, err := parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON("x"), "include": json.RawMessage(option)})
+		if err != nil {
+			t.Errorf("include=%s: %v", option, err)
+		}
+	}
+	a := testApp(t, t.TempDir())
+	key, _ := newKey(t, a)
+	for _, option := range []string{`"reasoning.encrypted_content"`, "{}", "[null]", "[7]", `["reasoning.encrypted_content","unknown.selector"]`} {
+		hit(t, a, "POST", "/v1/responses", key, `{"model":"fixture","input":"x","include":`+option+"}", "", 400)
+	}
+}
+
 func TestResponsesCLI(t *testing.T) {
 	if os.Getenv("TEST_CODEX_BIN") == "" {
 		t.Skip("requires the pinned CLI")
@@ -108,9 +125,16 @@ func TestResponsesCLI(t *testing.T) {
 			if strings.Contains(latest, "fixture-cli-wire") && len(b.Tools) == 0 {
 				t.Errorf("CLI tool definitions missing")
 			}
-			event("response.output_item.added", M{"output_index": 0, "item": M{"type": "message", "id": "msg_x", "role": "assistant", "phase": "final_answer", "content": []any{}}})
-			event("response.output_text.delta", M{"output_index": 0, "content_index": 0, "item_id": "msg_x", "delta": "fixture-answer"})
-			event("response.output_item.done", M{"output_index": 0, "item": M{"id": "msg_x", "type": "message", "role": "assistant", "phase": "final_answer", "status": "completed", "content": []M{{"type": "output_text", "text": "fixture-answer", "annotations": []any{}}}}})
+			index := 0
+			part := M{"type": "output_text", "text": "fixture-answer", "annotations": []any{}}
+			if strings.Contains(latest, "fixture-includes") {
+				event("response.output_item.done", M{"output_index": index, "item": M{"type": "reasoning", "id": "rs_fixture", "encrypted_content": "fixture-opaque", "summary": []any{}}})
+				part["logprobs"] = []M{{"token": "fixture-answer", "logprob": -0.1, "top_logprobs": []any{}}}
+				index++
+			}
+			event("response.output_item.added", M{"output_index": index, "item": M{"type": "message", "id": "msg_x", "role": "assistant", "phase": "final_answer", "content": []any{}}})
+			event("response.output_text.delta", M{"output_index": index, "content_index": 0, "item_id": "msg_x", "delta": "fixture-answer"})
+			event("response.output_item.done", M{"output_index": index, "item": M{"id": "msg_x", "type": "message", "role": "assistant", "phase": "final_answer", "status": "completed", "content": []M{part}}})
 		}
 		for i, call := range calls {
 			event("response.output_item.done", M{"output_index": i, "item": call})
@@ -164,6 +188,27 @@ func TestResponsesCLI(t *testing.T) {
 	if err := a.db.QueryRow(`SELECT count(*) FROM requests JOIN request_metrics ON requests.id=request_id WHERE status=200 AND input=17 AND output=101 AND cached=4 AND reasoning=2 AND speed>0`).Scan(&n); err != nil || n < int(requests.Load())-1 || n > int(requests.Load()) {
 		t.Fatal(n, requests.Load(), err)
 	}
+
+	t.Run("optional include fields", func(t *testing.T) {
+		for _, stream := range []bool{false, true} {
+			fields := M{"model": "gpt-5.4", "input": "fixture-includes", "store": false, "stream": stream, "parallel_tool_calls": true,
+				"include": []string{"reasoning.encrypted_content", "message.output_text.logprobs", "reasoning.encrypted_content"}}
+			req := httptest.NewRequest("POST", path, bytes.NewReader(rawJSON(fields)))
+			req.Header.Set("Authorization", "Bearer "+other)
+			w := httptest.NewRecorder()
+			a.routes().ServeHTTP(w, req)
+			if got := w.Result().Header.Get("X-Codex-Tunnel-Omitted-Include"); got != "reasoning.encrypted_content, message.output_text.logprobs" {
+				t.Fatalf("stream=%v: omitted includes %q", stream, got)
+			}
+			body := w.Body.String()
+			if w.Code != 200 || !strings.Contains(body, "fixture-answer") || strings.Contains(body, "fixture-opaque") || strings.Contains(body, `"logprobs"`) {
+				t.Fatalf("stream=%v: %d %s", stream, w.Code, body)
+			}
+			if stream && !strings.Contains(body, "event: response.completed") || !stream && prop(body, "status") != "completed" {
+				t.Fatalf("stream=%v: incomplete response: %s", stream, body)
+			}
+		}
+	})
 
 	t.Run("client permits parallel calls", func(t *testing.T) {
 		body := M{"model": "gpt-5.4", "input": "fixture-two-cities", "parallel_tool_calls": true, "tools": []M{{"type": "function", "name": "forecast", "parameters": M{"type": "object"}}}}
