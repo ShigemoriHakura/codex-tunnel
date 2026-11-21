@@ -144,7 +144,7 @@ curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
 
 流式 Responses 请求在上游失败时以 `response.failed` 结束。明确的 Cyber 拦截或高风险 Cyber 改路通知会终止当前轮次，并返回 `cyber_policy`。网关按密钥、会话、路由和请求内容保存指纹，24 小时内重复提交会在本地被拒绝。未开始发送响应时返回 HTTP 400 和 `X-Should-Retry: false`。普通断流按传输故障处理。
 
-续聊时，网关在向新 CLI 线程注入历史前移除输入项的外部 `id`，保留工具调用及结果的 `call_id`。
+续聊时，客户端可以原样回传包含 `reasoning` 项的历史，包括带 `content`、`encrypted_content` 或省略 `summary` 的项。网关在保存输入和创建新 CLI 线程前跳过这些项，用可见消息和工具结果续聊。注入历史时会移除输入项的外部 `id`，保留工具调用及结果的 `call_id`。
 
 支持回答详略设置的模型可使用 `text.verbosity` 指定 `low`、`medium` 或 `high`，可与 `text.format` 同时使用。桌面端可发送 `reasoning.context: "all_turns"`，网关侧的 CLI 会根据模型能力选择上游推理上下文模式。
 

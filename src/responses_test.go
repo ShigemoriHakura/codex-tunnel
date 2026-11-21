@@ -180,6 +180,39 @@ func TestResponsesReasoningOptions(t *testing.T) {
 	}
 }
 
+func TestResponsesReasoningHistory(t *testing.T) {
+	parse := func(input []M) (*responsesRequest, error) {
+		return parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON(input)})
+	}
+	call := M{"type": "function_call", "name": "lookup", "call_id": "call_fixture", "arguments": "{}"}
+	result := M{"type": "function_call_output", "call_id": "call_fixture", "output": "done"}
+	for _, item := range []M{
+		{"type": "reasoning", "id": "rs_fixture"},
+		{"type": "reasoning", "summary": nil, "encrypted_content": "opaque"},
+		{"type": "reasoning", "summary": []M{}, "content": []M{{"type": "reasoning_text", "text": "fixture detail"}}},
+	} {
+		b, err := parse([]M{call, item, result})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b.input) != 2 || !bytes.Equal(b.input[0], rawJSON(call)) || !bytes.Equal(b.input[1], rawJSON(result)) {
+			t.Fatal("reasoning replay changed the client tool exchange")
+		}
+		if _, err := parse([]M{item}); err == nil {
+			t.Fatal("reasoning history alone started a turn")
+		}
+	}
+	for _, item := range []M{
+		{"type": "reasoning", "summary": []M{{"type": "summary_text"}}},
+		{"type": "reasoning", "content": "invalid"},
+		{"type": "reasoning", "encrypted_content": 1},
+	} {
+		if _, err := parse([]M{item, result}); err == nil {
+			t.Fatal("accepted malformed reasoning history")
+		}
+	}
+}
+
 func TestResponsesCLI(t *testing.T) {
 	if os.Getenv("TEST_CODEX_BIN") == "" {
 		t.Skip("requires the pinned CLI")
@@ -235,8 +268,8 @@ func TestResponsesCLI(t *testing.T) {
 				t.Error("client or gateway item ID reached the upstream provider")
 			}
 		}
-		if strings.Contains(full, "fixture-public-summary") {
-			t.Error("display summary was injected as model context")
+		if strings.Contains(full, "fixture-public-summary") || strings.Contains(full, "fixture-replayed-") {
+			t.Error("replayed reasoning was injected as model context")
 		}
 		if strings.Contains(string(rawJSON(b)), externalID) {
 			t.Error("external client metadata reached the CLI provider")
@@ -507,6 +540,21 @@ func TestResponsesCLI(t *testing.T) {
 		}
 		followup := M{"model": "gpt-5.4", "input": append(resp.Output, rawJSON(M{"role": "user", "content": "continue"}))}
 		hit(t, a, "POST", path, other, string(rawJSON(followup)), "", 200)
+		var echoed responseFields
+		decode(t, string(resp.Output[0]), &echoed)
+		echoed["encrypted_content"] = rawJSON("fixture-replayed-ciphertext")
+		echoed["content"] = rawJSON([]M{{"type": "reasoning_text", "text": "fixture-replayed-detail"}})
+		followup["input"] = responseItems{rawJSON(echoed), resp.Output[1], rawJSON(M{"role": "user", "content": "continue"})}
+		continued := hit(t, a, "POST", path, other, string(rawJSON(followup)), "", 200)
+		var saved responseItems
+		var savedInput []byte
+		if err := a.db.QueryRow("SELECT input FROM response_turns WHERE id=?", prop(continued, "id")).Scan(&savedInput); err != nil {
+			t.Fatal(err)
+		}
+		decode(t, string(savedInput), &saved)
+		if len(saved) != 2 || !bytes.Equal(saved[0], resp.Output[1]) || prop(string(saved[1]), "role") != "user" || strings.Contains(continued, "fixture-replayed-") {
+			t.Fatal("unexpected stored history or response after reasoning replay")
+		}
 		followup["input"], followup["previous_response_id"] = "continue", resp.ID
 		hit(t, a, "POST", path, other, string(rawJSON(followup)), "", 200)
 		body["stream"] = true

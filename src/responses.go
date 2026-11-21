@@ -197,8 +197,8 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 	if len(b.input) == 0 && b.previous == "" {
 		return nil, invalidResponse("Provide at least one input item")
 	}
-	// Desktop clients can echo public summaries and hosted search activity.
-	// Only messages and client tool exchanges enter a fresh CLI thread.
+	// A desktop transcript may include the previous provider's reasoning and
+	// hosted search activity. Only messages and client tool exchanges are replayed.
 	var additional []json.RawMessage
 	replay := b.input[:0]
 	for _, v := range b.input {
@@ -245,8 +245,8 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 				Content   []json.RawMessage
 				Encrypted *string `json:"encrypted_content"`
 			}
-			if json.Unmarshal(v, &item) != nil || item.Summary == nil || len(item.Content) > 0 || item.Encrypted != nil {
-				return nil, invalidResponse("Only public reasoning summary items can be replayed")
+			if json.Unmarshal(v, &item) != nil {
+				return nil, invalidResponse("Invalid reasoning history item")
 			}
 			for _, part := range item.Summary {
 				if part.Type != "summary_text" || part.Text == nil {
@@ -289,6 +289,7 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 	if len(b.input) > 0 && len(replay) == 0 {
 		return nil, invalidResponse("Provide a user message or tool result with replayed display items")
 	}
+	clear(b.input[len(replay):])
 	b.input = replay
 	if err := b.parseTools(f, additional); err != nil {
 		return nil, err
