@@ -75,6 +75,22 @@ func TestResponsesClientMetadata(t *testing.T) {
 	}
 }
 
+func TestResponsesReasoningOptions(t *testing.T) {
+	for _, mode := range []string{"auto", "concise", "detailed", "none"} {
+		for _, field := range []string{"summary", "generate_summary"} {
+			req, err := parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON("x"), "reasoning": rawJSON(M{"effort": "high", field: mode})})
+			if err != nil || req.options.summary != mode || req.options.effort != "high" {
+				t.Fatalf("%s=%s: %v", field, mode, err)
+			}
+		}
+	}
+	for _, raw := range []string{`{"summary":false}`, `{"summary":""}`, `{"summary":"verbose"}`, `{"summary":"auto","generate_summary":"concise"}`, `{"other":true}`} {
+		if _, err := parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON("x"), "reasoning": json.RawMessage(raw)}); err == nil {
+			t.Errorf("accepted invalid reasoning %s", raw)
+		}
+	}
+}
+
 func TestResponsesCLI(t *testing.T) {
 	if os.Getenv("TEST_CODEX_BIN") == "" {
 		t.Skip("requires the pinned CLI")
@@ -104,6 +120,7 @@ func TestResponsesCLI(t *testing.T) {
 			Previous       string            `json:"previous_response_id"`
 			ClientMetadata map[string]string `json:"client_metadata"`
 			PromptCacheKey string            `json:"prompt_cache_key"`
+			Reasoning      struct{ Effort, Summary string }
 		}
 		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
 			t.Error(err)
@@ -114,6 +131,9 @@ func TestResponsesCLI(t *testing.T) {
 		}
 		latest := string(b.Input[len(b.Input)-1])
 		full := string(rawJSON(b.Input))
+		if strings.Contains(full, "fixture-public-summary") {
+			t.Error("display summary was injected as model context")
+		}
 		if strings.Contains(string(rawJSON(b)), externalID) {
 			t.Error("external client metadata reached the CLI provider")
 		}
@@ -160,6 +180,20 @@ func TestResponsesCLI(t *testing.T) {
 			}
 			index := 0
 			part := M{"type": "output_text", "text": "fixture-answer", "annotations": []any{}}
+			if strings.Contains(latest, "fixture-wants-summary") {
+				if b.Reasoning.Summary != "auto" || b.Reasoning.Effort != "high" {
+					t.Errorf("unexpected provider reasoning options %+v", b.Reasoning)
+				}
+				rs := M{"type": "reasoning", "id": "rs_fixture", "summary": []M{}}
+				event("response.output_item.added", M{"output_index": index, "item": rs})
+				event("response.reasoning_summary_part.added", M{"output_index": index, "item_id": "rs_fixture", "summary_index": 0, "part": M{"type": "summary_text", "text": ""}})
+				event("response.reasoning_summary_text.delta", M{"output_index": index, "item_id": "rs_fixture", "summary_index": 0, "delta": "fixture-public-"})
+				rs["summary"] = []M{{"type": "summary_text", "text": "fixture-public-summary"}, {"type": "summary_text", "text": "second paragraph"}}
+				rs["content"] = []M{{"type": "reasoning_text", "text": "fixture-private-marker"}}
+				rs["encrypted_content"] = "fixture-opaque"
+				event("response.output_item.done", M{"output_index": index, "item": rs})
+				index++
+			}
 			if strings.Contains(latest, "fixture-includes") {
 				event("response.output_item.done", M{"output_index": index, "item": M{"type": "reasoning", "id": "rs_fixture", "encrypted_content": "fixture-opaque", "summary": []any{}}})
 				part["logprobs"] = []M{{"token": "fixture-answer", "logprob": -0.1, "top_logprobs": []any{}}}
@@ -222,6 +256,51 @@ func TestResponsesCLI(t *testing.T) {
 	if err := a.db.QueryRow(`SELECT count(*) FROM requests JOIN request_metrics ON requests.id=request_id WHERE status=200 AND input=17 AND output=101 AND cached=4 AND reasoning=2 AND speed>0`).Scan(&n); err != nil || n < int(requests.Load())-1 || n > int(requests.Load()) {
 		t.Fatal(n, requests.Load(), err)
 	}
+
+	t.Run("public reasoning summary", func(t *testing.T) {
+		body := M{"model": "gpt-5.4", "input": "fixture-wants-summary", "reasoning": M{"effort": "high", "summary": "auto"}}
+		wire := hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+		var resp struct {
+			ID     string
+			Output responseItems
+		}
+		if err := json.Unmarshal([]byte(wire), &resp); err != nil || len(resp.Output) != 2 || prop(string(resp.Output[0]), "type") != "reasoning" || prop(string(resp.Output[1]), "type") != "message" || !strings.Contains(string(resp.Output[0]), "fixture-public-summary") || !strings.Contains(string(resp.Output[0]), "second paragraph") || strings.Contains(wire, "fixture-private-marker") || strings.Contains(wire, "fixture-opaque") {
+			t.Fatalf("unexpected JSON summary: %s", wire)
+		}
+		followup := M{"model": "gpt-5.4", "input": append(resp.Output, rawJSON(M{"role": "user", "content": "continue"}))}
+		hit(t, a, "POST", path, other, string(rawJSON(followup)), "", 200)
+		followup["input"], followup["previous_response_id"] = "continue", resp.ID
+		hit(t, a, "POST", path, other, string(rawJSON(followup)), "", 200)
+		body["stream"] = true
+		wire = hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+		for _, expected := range []string{"event: response.reasoning_summary_part.added", "event: response.reasoning_summary_text.delta", "event: response.reasoning_summary_text.done", "event: response.reasoning_summary_part.done", `"summary_index":1`, `"output_index":1`, "event: response.completed"} {
+			if !strings.Contains(wire, expected) {
+				t.Fatalf("SSE lacks %s: %s", expected, wire)
+			}
+		}
+		if strings.Contains(wire, "fixture-private-marker") || strings.Contains(wire, "fixture-opaque") {
+			t.Fatal("SSE contained a private marker")
+		}
+		var deltas [2]string
+		for line := range strings.SplitSeq(wire, "\n") {
+			payload, ok := strings.CutPrefix(line, "data: ")
+			if !ok || prop(payload, "type") != "response.reasoning_summary_text.delta" {
+				continue
+			}
+			var e struct {
+				Output int `json:"output_index"`
+				Part   int `json:"summary_index"`
+				Delta  string
+			}
+			if err := json.Unmarshal([]byte(payload), &e); err != nil || e.Output != 0 || e.Part < 0 || e.Part >= len(deltas) {
+				t.Fatalf("invalid summary delta: %s", payload)
+			}
+			deltas[e.Part] += e.Delta
+		}
+		if deltas != [2]string{"fixture-public-summary", "second paragraph"} || !strings.Contains(wire, `"delta":"fixture-public-"`) {
+			t.Fatalf("live summary and final snapshot did not reconcile: %s", wire)
+		}
+	})
 
 	t.Run("optional include fields", func(t *testing.T) {
 		for _, stream := range []bool{false, true} {

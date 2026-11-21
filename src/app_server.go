@@ -228,7 +228,7 @@ func (s *appServer) dispatch(v packet) bool {
 		return true
 	}
 	switch v.Method {
-	case "item/started", "item/completed", "item/agentMessage/delta", "thread/tokenUsage/updated", "turn/completed":
+	case "item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/summaryTextDelta", "thread/tokenUsage/updated", "turn/completed":
 	default:
 		return true
 	}
@@ -237,7 +237,7 @@ func (s *appServer) dispatch(v packet) bool {
 		return false
 	}
 	s.mu.Lock()
-	if inbox := s.threads[route.ThreadID]; inbox != nil {
+	if inbox := s.threads[route.ThreadID]; inbox != nil && (v.Method != "item/reasoning/summaryTextDelta" || inbox.summaries) {
 		inbox.push(v)
 	}
 	s.mu.Unlock()
@@ -323,18 +323,19 @@ func (s *appServer) interruptLateTurn(reply <-chan packet, thread string) {
 
 type turnInbox struct {
 	clientTools bool
+	summaries   bool
 	events      chan packet
 	overflow    chan struct{}
 	bytes       atomic.Int64
 }
 
-func (s *appServer) subscribe(thread string, clientTools bool) (*turnInbox, error) {
+func (s *appServer) subscribe(thread string, clientTools, summaries bool) (*turnInbox, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.threads[thread] != nil {
 		return nil, errors.New("Codex thread already has an active turn")
 	}
-	i := &turnInbox{clientTools: clientTools, events: make(chan packet, 256), overflow: make(chan struct{})}
+	i := &turnInbox{clientTools: clientTools, summaries: summaries, events: make(chan packet, 256), overflow: make(chan struct{})}
 	s.threads[thread] = i
 	return i, nil
 }

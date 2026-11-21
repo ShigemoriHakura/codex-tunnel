@@ -15,6 +15,8 @@ type responseStream struct {
 	reply               *generationResponse
 	items               responseItems
 	final               responseFields
+	reasoning           M
+	pendingSummaries    []*responseSummary
 }
 
 func (s *responseStream) send(kind string, fields M) error {
@@ -30,6 +32,9 @@ func (s *responseStream) send(kind string, fields M) error {
 func (s *responseStream) envelope(status string, usage any) responseFields {
 	obj := responseFields{"id": rawJSON(s.id), "object": rawJSON("response"), "status": rawJSON(status), "created_at": rawJSON(s.created), "model": rawJSON(s.model), "output": rawJSON(s.items), "usage": rawJSON(usage), "store": rawJSON(s.store), "error": rawJSON(nil)}
 	obj["parallel_tool_calls"] = rawJSON(false)
+	if s.reasoning != nil {
+		obj["reasoning"] = rawJSON(s.reasoning)
+	}
 	if s.previous != "" {
 		obj["previous_response_id"] = rawJSON(s.previous)
 	}
@@ -43,6 +48,15 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 		return result{}, err
 	}
 	s.items = responseItems{}
+	if t.effort != "" || t.summary != "" {
+		s.reasoning = M{}
+		if t.effort != "" {
+			s.reasoning["effort"] = t.effort
+		}
+		if t.summary != "" {
+			s.reasoning["summary"] = t.summary
+		}
+	}
 	t.onThread = func(_, model string) error {
 		s.model = model
 		obj := s.envelope("in_progress", nil)
@@ -52,25 +66,34 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 		return s.send("response.in_progress", M{"response": obj})
 	}
 	msgID := id("msg_")
-	opened := false
+	msgIndex := -1
+	var streamedText strings.Builder
 	part := func(text string) M { return M{"type": "output_text", "text": text, "annotations": []any{}} }
 	message := func(status string, contents []M) M {
 		return M{"id": msgID, "type": "message", "role": "assistant", "status": status, "content": contents}
 	}
 	t.delta = func(delta string) error {
+		if msgIndex < 0 {
+			msgIndex = len(s.items)
+			s.items = append(s.items, nil)
+			if err := s.send("response.output_item.added", M{"output_index": msgIndex, "item": message("in_progress", []M{})}); err != nil {
+				return err
+			}
+			if err := s.send("response.content_part.added", M{"output_index": msgIndex, "content_index": 0, "item_id": msgID, "part": part("")}); err != nil {
+				return err
+			}
+		}
 		if chatDelta != nil {
 			return chatDelta(delta)
 		}
-		if !opened {
-			opened = true
-			if err := s.send("response.output_item.added", M{"output_index": 0, "item": message("in_progress", []M{})}); err != nil {
-				return err
-			}
-			if err := s.send("response.content_part.added", M{"output_index": 0, "content_index": 0, "item_id": msgID, "part": part("")}); err != nil {
-				return err
-			}
+		if len(t.tools) > 0 {
+			streamedText.WriteString(delta)
 		}
-		return s.send("response.output_text.delta", M{"output_index": 0, "content_index": 0, "item_id": msgID, "delta": delta})
+		return s.send("response.output_text.delta", M{"output_index": msgIndex, "content_index": 0, "item_id": msgID, "delta": delta})
+	}
+	if t.summary != "" && t.summary != "none" {
+		t.onSummaryDelta = s.summaryPart
+		t.onSummary = s.finishSummary
 	}
 	var function M
 	if len(t.tools) > 0 {
@@ -88,23 +111,37 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 	if err != nil {
 		return res, err
 	}
-	if res.text != "" {
-		if !opened && chatDelta == nil {
-			if err := t.delta(res.text); err != nil {
-				return res, err
+	// A tool handoff can interrupt the CLI before all item completions arrive.
+	for len(s.pendingSummaries) > 0 {
+		if err := s.finishSummary(s.pendingSummaries[0].cliID, nil); err != nil {
+			return res, err
+		}
+	}
+	if msgIndex >= 0 && res.text == "" {
+		res.text = streamedText.String()
+	}
+	if res.text != "" || msgIndex >= 0 {
+		if msgIndex < 0 {
+			if chatDelta == nil {
+				if err := t.delta(res.text); err != nil {
+					return res, err
+				}
+			} else {
+				msgIndex = len(s.items)
+				s.items = append(s.items, nil)
 			}
 		}
 		item := message("completed", []M{part(res.text)})
-		if err := s.send("response.output_text.done", M{"output_index": 0, "content_index": 0, "item_id": msgID, "text": res.text}); err != nil {
+		if err := s.send("response.output_text.done", M{"output_index": msgIndex, "content_index": 0, "item_id": msgID, "text": res.text}); err != nil {
 			return res, err
 		}
-		if err := s.send("response.content_part.done", M{"output_index": 0, "content_index": 0, "item_id": msgID, "part": part(res.text)}); err != nil {
+		if err := s.send("response.content_part.done", M{"output_index": msgIndex, "content_index": 0, "item_id": msgID, "part": part(res.text)}); err != nil {
 			return res, err
 		}
-		if err := s.send("response.output_item.done", M{"output_index": 0, "item": item}); err != nil {
+		if err := s.send("response.output_item.done", M{"output_index": msgIndex, "item": item}); err != nil {
 			return res, err
 		}
-		s.items = append(s.items, rawJSON(item))
+		s.items[msgIndex] = rawJSON(item)
 	}
 	if function != nil {
 		index := len(s.items)

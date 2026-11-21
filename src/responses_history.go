@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -66,6 +67,11 @@ func (a *app) responseContext(ctx context.Context, b *responsesRequest, owner, s
 		if json.Unmarshal(input, &in) != nil || json.Unmarshal(output, &out) != nil {
 			return nil, errors.New("invalid saved Responses history")
 		}
+		// A public summary carries no model replay state.
+		out = slices.DeleteFunc(out, func(raw json.RawMessage) bool {
+			var item struct{ Type string }
+			return json.Unmarshal(raw, &item) == nil && item.Type == "reasoning"
+		})
 		reverse = append(reverse, append(in, out...))
 	}
 	var history responseItems

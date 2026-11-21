@@ -62,9 +62,31 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 				return nil, invalidResponse("instructions must be a string")
 			}
 		case "reasoning":
-			var reasoning struct{ Effort string }
+			var reasoning struct {
+				Effort          string
+				Summary         *string
+				GenerateSummary *string `json:"generate_summary"`
+			}
 			if err := strictOption(v, &reasoning); err != nil {
-				return nil, invalidResponse("The CLI adapter supports reasoning.effort only")
+				if field, ok := strings.CutPrefix(err.Error(), `json: unknown field "`); ok {
+					if field = strings.TrimSuffix(field, `"`); responseFieldName.MatchString(field) {
+						return nil, invalidResponse("Unsupported Responses field reasoning." + field)
+					}
+				}
+				return nil, invalidResponse("reasoning accepts effort, summary and generate_summary")
+			}
+			if reasoning.Summary == nil {
+				reasoning.Summary = reasoning.GenerateSummary
+			} else if reasoning.GenerateSummary != nil && *reasoning.Summary != *reasoning.GenerateSummary {
+				return nil, invalidResponse("reasoning.summary and reasoning.generate_summary disagree")
+			}
+			if reasoning.Summary != nil {
+				switch *reasoning.Summary {
+				case "auto", "concise", "detailed", "none":
+					b.options.summary = *reasoning.Summary
+				default:
+					return nil, invalidResponse("reasoning.summary must be auto, concise, detailed, none or null")
+				}
 			}
 			b.options.effort = reasoning.Effort
 		case "text":
@@ -158,7 +180,10 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 	if len(b.input) == 0 && b.previous == "" {
 		return nil, invalidResponse("Provide at least one input item")
 	}
-	for index, v := range b.input {
+	// Public summaries are display items. Desktop clients may echo them when
+	// replaying a transcript. Only messages and tool exchanges enter a new CLI thread.
+	replay := b.input[:0]
+	for _, v := range b.input {
 		var i struct {
 			Type, Role, Name string
 			CallID           string `json:"call_id"`
@@ -191,8 +216,26 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 					}
 					item["content"] = rawJSON([]responseFields{{"type": rawJSON(partType), "text": i.Content}})
 				}
-				b.input[index] = rawJSON(item)
+				v = rawJSON(item)
 			}
+		case "reasoning":
+			var item struct {
+				Summary []struct {
+					Type string
+					Text *string
+				}
+				Content   []json.RawMessage
+				Encrypted *string `json:"encrypted_content"`
+			}
+			if json.Unmarshal(v, &item) != nil || item.Summary == nil || len(item.Content) > 0 || item.Encrypted != nil {
+				return nil, invalidResponse("Only public reasoning summary items can be replayed")
+			}
+			for _, part := range item.Summary {
+				if part.Type != "summary_text" || part.Text == nil {
+					return nil, invalidResponse("Invalid reasoning summary part")
+				}
+			}
+			continue
 		case "function_call_output":
 			if i.CallID == "" {
 				return nil, invalidResponse("function_call_output requires a call_id")
@@ -207,7 +250,12 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 		default:
 			return nil, invalidResponse("Unsupported input item type")
 		}
+		replay = append(replay, v)
 	}
+	if len(b.input) > 0 && len(replay) == 0 {
+		return nil, invalidResponse("Provide a user message or tool result with the summary")
+	}
+	b.input = replay
 	if err := b.parseTools(f); err != nil {
 		return nil, err
 	}

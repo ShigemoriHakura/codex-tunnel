@@ -142,14 +142,15 @@ curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
 
 省略 `stream` 返回一个包含 `output` 与 `usage` 的 JSON 对象。流式调用返回具名 SSE 事件，如 `response.output_text.delta`、`response.output_item.done` 和 `response.completed`。输入支持字符串、带角色的消息数组、内联 Base64 图片，以及与 `call_id` 匹配的 `function_call_output`。支持 `instructions`、`reasoning.effort` 和 `text.format` 的文本或 JSON Schema 输出。
 
-客户端可以发送标准 `include` 选择器，例如 `["reasoning.encrypted_content"]`。当前网关使用的 app-server 事件提供回答文本和用量。对于加密推理内容、逐词元对数概率等无法返回的附加字段，网关在 HTTP 响应头 `X-Codex-Tunnel-Omitted-Include` 中列出对应选择器，JSON 和 SSE 遵循相同规则。使用 `store:false` 的无状态客户端需自行回传可见对话历史，也可以绑定网关会话续聊。
+桌面端可直接发送 `"reasoning":{"summary":"auto"}`，也可选 `concise`、`detailed` 或 `none`。当模型提供公开摘要时，JSON 的 `output` 中会包含带 `summary_text` 段落的 `reasoning` 项，流式客户端可读取 `response.reasoning_summary_text.delta`。最终回答仍在 `message` 项中。
+
+客户端可以发送标准 `include` 选择器，例如 `["reasoning.encrypted_content"]`。当前网关使用的 app-server 事件提供回答文本、公开摘要和用量。对于加密推理内容、逐词元对数概率等无法返回的附加字段，网关在 HTTP 响应头 `X-Codex-Tunnel-Omitted-Include` 中列出对应选择器，JSON 和 SSE 遵循相同规则。使用 `store:false` 的无状态客户端需自行回传可见对话历史，也可以绑定网关会话续聊。
 
 网关接受客户端随请求发送的 `client_metadata`（JSON 对象）和 `prompt_cache_key`（字符串），两者均可省略或设为 `null`。这两个字段仅在入口校验。上游线程标识、轮次标识和缓存键由运行在网关的 Codex CLI 管理。跨请求续聊使用 `previous_response_id`、`X-Session-ID` 或密钥绑定会话。
 
-**Codex 桌面端自定义提供方。** 保留现有网关地址、模型和密钥配置。Codex 0.171.0 默认还会发送推理摘要选项、命名空间工具和托管网页搜索声明；当前适配器支持文本和普通非严格函数。可在使用此网关的受信任项目的 `.codex/config.toml` 中合并以下设置，适用于该项目的新会话。[Codex 配置说明](https://learn.chatgpt.com/docs/config-file/config-basic)
+**Codex 桌面端自定义提供方。** 保留现有网关地址、模型和密钥配置。Codex 0.171.0 默认还会声明命名空间工具和托管网页搜索。当前适配器支持推理摘要与普通非严格函数。可在使用此网关的受信任项目的 `.codex/config.toml` 中合并以下设置，适用于该项目的新会话。[Codex 配置说明](https://learn.chatgpt.com/docs/config-file/config-basic)
 
 ```toml
-model_reasoning_summary = "none"
 web_search = "disabled"
 
 [agents]

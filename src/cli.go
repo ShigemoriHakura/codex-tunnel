@@ -229,9 +229,12 @@ type turn struct {
 	history        responseItems
 	instructions   string
 	effort         string
+	summary        string
 	outputSchema   json.RawMessage
 	tools          []M
 	onTool         func(string, string, string, json.RawMessage) error
+	onSummary      func(string, []string) error
+	onSummaryDelta func(string, int, string) error
 	onThread       func(string, string) error
 	delta          func(string) error
 }
@@ -312,7 +315,7 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 		return res, errUnconfirmedRPC
 	}
 	thread := start.Thread.ID
-	inbox, e := p.subscribe(thread, t.onTool != nil)
+	inbox, e := p.subscribe(thread, t.onTool != nil, t.onSummaryDelta != nil)
 	if e != nil {
 		return res, e
 	}
@@ -336,8 +339,12 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 	event := func(v packet) error {
 		var n struct {
 			ThreadID, TurnID, ItemID, Delta string
-			Item                            struct{ ID, Type, Text, Phase, Result, SavedPath, Status string }
-			Turn                            struct {
+			SummaryIndex                    int
+			Item                            struct {
+				ID, Type, Text, Phase, Result, SavedPath, Status string
+				Summary                                          []string
+			}
+			Turn struct {
 				ID, Status string
 				Error      struct {
 					Info json.RawMessage `json:"codexErrorInfo"`
@@ -352,6 +359,10 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			return nil
 		}
 		switch v.Method {
+		case "item/reasoning/summaryTextDelta":
+			if t.onSummaryDelta != nil && n.TurnID == turnID && n.Delta != "" {
+				return t.onSummaryDelta(n.ItemID, n.SummaryIndex, n.Delta)
+			}
 		case "item/started":
 			if n.Item.Type == "agentMessage" && n.Item.Phase == "commentary" {
 				commentary[n.Item.ID] = true
@@ -368,6 +379,10 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			res.metered = true
 		case "item/completed":
 			switch n.Item.Type {
+			case "reasoning":
+				if t.onSummary != nil && n.TurnID == turnID {
+					return t.onSummary(n.Item.ID, n.Item.Summary)
+				}
 			case "agentMessage":
 				if n.Item.Phase != "commentary" {
 					res.text = n.Item.Text
@@ -397,6 +412,9 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 	params := M{"threadId": thread, "environments": []any{}, "input": t.input}
 	if t.effort != "" {
 		params["effort"] = t.effort
+	}
+	if t.summary != "" {
+		params["summary"] = t.summary
 	}
 	if t.outputSchema != nil {
 		params["outputSchema"] = t.outputSchema
