@@ -49,6 +49,50 @@ func TestResponsesToolDeclarations(t *testing.T) {
 	}
 }
 
+func TestResponsesNamespaceDescription(t *testing.T) {
+	prefix := strings.Repeat("界", 1023) + "🧰"
+	for _, tc := range []struct {
+		name, description string
+		allDeferred       bool
+		fullOn            int
+	}{
+		{"empty", "", false, -1},
+		{"exact limit", prefix, false, -1},
+		{"one over", prefix + "尾", false, 1},
+		{"only deferred members", prefix + strings.Repeat("尾", 4096), true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ns := M{"type": "namespace", "name": "sample", "description": tc.description, "tools": []M{
+				{"type": "function", "name": "first", "description": "first help", "defer_loading": true},
+				{"type": "function", "name": "second", "description": "second help", "defer_loading": tc.allDeferred},
+			}}
+			b, err := parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON("x"), "tools": rawJSON([]M{ns})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := b.options.tools[0]
+			want := tc.description
+			if tc.fullOn >= 0 {
+				want = prefix
+			}
+			if spec["description"] != want {
+				t.Fatal("incorrect native namespace description")
+			}
+			for i, tool := range spec["tools"].([]M) {
+				original := []string{"first help", "second help"}[i]
+				got := tool["description"].(string)
+				if i == tc.fullOn {
+					if !strings.HasPrefix(got, original) || !strings.HasSuffix(got, tc.description) {
+						t.Fatal("missing original help or full namespace documentation")
+					}
+				} else if got != original {
+					t.Fatal("unexpected change to member help")
+				}
+			}
+		})
+	}
+}
+
 func TestResponsesTextVerbosity(t *testing.T) {
 	for _, verbosity := range []string{"low", "medium", "high", "invalid"} {
 		options := M{"verbosity": verbosity, "format": M{"type": "json_schema", "schema": M{"type": "object"}}}
@@ -195,6 +239,9 @@ func TestResponsesCLI(t *testing.T) {
 		event := func(typ string, v M) { v["type"] = typ; fmt.Fprintf(&s, "event: %s\ndata: %s\n\n", typ, rawJSON(v)) }
 		event("response.created", M{"response": M{"id": "upstream", "status": "in_progress"}})
 		var calls []M
+		if (strings.Contains(latest, "fixture-client-custom") || strings.Contains(latest, "fixture-desktop-call")) && !strings.Contains(string(rawJSON(b.Tools)), "fixture-namespace-tail") {
+			t.Error("namespace documentation tail missing from native tool declarations")
+		}
 		if strings.Contains(latest, "fixture-client-custom") {
 			specs := string(rawJSON(b.Tools))
 			if !strings.Contains(specs, `"name":"ct_scripts"`) || !strings.Contains(specs, "fixture-grammar") || !strings.Contains(specs, `"name":"ct_lookup"`) {
@@ -350,7 +397,7 @@ func TestResponsesCLI(t *testing.T) {
 
 	t.Run("desktop tools", func(t *testing.T) {
 		child := M{"type": "function", "name": "lookup", "parameters": M{"type": "object", "properties": M{"value": M{"type": "string"}}}}
-		specs := []M{{"type": "namespace", "name": "alpha", "description": "first", "tools": []M{child}}, {"type": "namespace", "name": "beta", "description": "second", "tools": []M{child}}, {"type": "web_search", "external_web_access": false}}
+		specs := []M{{"type": "namespace", "name": "alpha", "description": "first", "tools": []M{child}}, {"type": "namespace", "name": "beta", "description": strings.Repeat("界", 1024) + "fixture-namespace-tail", "tools": []M{child}}, {"type": "web_search", "external_web_access": false}}
 		body := M{"model": "gpt-5.4", "input": "fixture-desktop-call", "tools": specs}
 		for _, stream := range []bool{false, true} {
 			body["stream"] = stream
@@ -379,7 +426,7 @@ func TestResponsesCLI(t *testing.T) {
 
 	t.Run("custom tools from Responses Lite", func(t *testing.T) {
 		def := M{"type": "custom", "name": "echo", "format": M{"type": "grammar", "syntax": "lark", "definition": `start: "fixture-grammar"`}}
-		toolsItem := M{"type": "additional_tools", "role": "developer", "tools": []M{{"type": "namespace", "name": "scripts", "tools": []M{def}}}}
+		toolsItem := M{"type": "additional_tools", "role": "developer", "tools": []M{{"type": "namespace", "name": "scripts", "description": strings.Repeat("a", 1024) + "fixture-namespace-tail", "tools": []M{def}}}}
 		body := M{"model": "gpt-5.4", "input": []M{toolsItem, {"role": "user", "content": "fixture-client-custom"}}, "tools": []M{{"type": "function", "name": "lookup"}}}
 		for _, stream := range []bool{false, true} {
 			body["stream"] = stream

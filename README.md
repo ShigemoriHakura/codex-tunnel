@@ -152,6 +152,8 @@ curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
 
 Codex 桌面端使用自定义 Responses 提供方时，可以沿用默认的代理和网页搜索设置。一次请求可同时声明普通函数（`function`）、自定义文本工具（`custom`）、命名空间（`namespace`）和托管网页搜索（`web_search`）。客户端函数在发起请求的客户端执行。网关在 JSON、流式事件和续聊历史中保留原始函数名、命名空间和 `call_id`，不同命名空间可以使用相同的函数名。对于使用 Responses Lite 的桌面端，网关也会从开发者角色的 `additional_tools` 输入项读取工具声明。
 
+命名空间说明超过 1024 个 Unicode 字符时，网关将前 1024 个字符放入 app-server 的命名空间字段，并将完整说明附在一个成员工具的描述中。客户端可以直接发送原文。
+
 自定义文本工具通过 app-server 动态函数传递原始输入，支持文本、Lark 和正则格式声明。网关将语法定义提供给模型，返回 `custom_tool_call`，由客户端校验并执行，再通过 `custom_tool_call_output` 回传结果。
 
 网页搜索由网关侧的 Codex app-server 执行。`external_web_access: false` 使用缓存，`true` 使用实时搜索。`web_search_call` 输出项记录 CLI 报告的搜索操作，`include: ["web_search_call.results"]` 可请求 CLI 提供的结果。未声明网页搜索或指定 `tool_choice: "none"` 时，该轮关闭网页搜索。

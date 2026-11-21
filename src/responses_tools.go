@@ -134,9 +134,6 @@ func (t *turn) clientNamespace(raw json.RawMessage, path string) (M, error) {
 	if !clientToolIdentifier.MatchString(ns.Name) || len(ns.Name) > 64 || len(ns.Tools) == 0 {
 		return nil, invalidResponse(path + " requires a namespace name and a nonempty array of tools")
 	}
-	if len([]rune(ns.Description)) > 1024 {
-		return nil, invalidResponse(path + ".description exceeds the CLI namespace limit of 1024 characters")
-	}
 	children := make([]M, 0, len(ns.Tools))
 	for i, child := range ns.Tools {
 		f, err := t.clientCallable(child, ns.Name, fmt.Sprintf("%s.tools[%d]", path, i))
@@ -145,7 +142,31 @@ func (t *turn) clientNamespace(raw json.RawMessage, path string) (M, error) {
 		}
 		children = append(children, f)
 	}
-	return M{"type": "namespace", "name": nativeToolIdentifier(ns.Name, 64), "description": ns.Description, "tools": children}, nil
+	description := fitNamespaceDescription(ns.Description, children)
+	return M{"type": "namespace", "name": nativeToolIdentifier(ns.Name, 64), "description": description, "tools": children}, nil
+}
+
+// app-server limits the namespace field to 1024 Unicode code points. Keep
+// longer documentation in tool metadata, with one copy on a visible member
+// when possible. Function descriptions have no corresponding protocol limit.
+func fitNamespaceDescription(description string, children []M) string {
+	const limit = 1024
+	count := 0
+	for end := range description {
+		if count == limit {
+			member := children[0]
+			for _, child := range children {
+				if child["deferLoading"] != true {
+					member = child
+					break
+				}
+			}
+			member["description"] = member["description"].(string) + "\n\nShared namespace documentation:\n" + description
+			return description[:end]
+		}
+		count++
+	}
+	return description
 }
 
 func (b *responsesRequest) parseTools(f responseFields, additional []json.RawMessage) error {
