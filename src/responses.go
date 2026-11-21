@@ -79,8 +79,10 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 			}
 		case "tools", "tool_choice":
 		case "parallel_tool_calls":
-			if string(v) != "false" {
-				return nil, invalidResponse("The CLI adapter supports one client tool call at a time. Set parallel_tool_calls=false")
+			// A client may allow parallel calls. This adapter always hands off one.
+			var allowed *bool
+			if json.Unmarshal(v, &allowed) != nil {
+				return nil, invalidResponse("parallel_tool_calls must be a boolean or null")
 			}
 		case "include":
 			var selectors []string

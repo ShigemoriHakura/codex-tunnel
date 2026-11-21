@@ -23,6 +23,17 @@ func TestResponsesValidation(t *testing.T) {
 	}
 	hit(t, a, "POST", "/v1/responses", "bad", `{}`, "", 401)
 }
+
+func TestResponsesParallelToolCallsOption(t *testing.T) {
+	for _, option := range []string{"true", "false", "null", `"false"`, "1", "[]", "{}"} {
+		_, err := parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON("x"), "parallel_tool_calls": json.RawMessage(option)})
+		valid := option == "true" || option == "false" || option == "null"
+		if valid != (err == nil) {
+			t.Errorf("parallel_tool_calls=%s: %v", option, err)
+		}
+	}
+}
+
 func TestResponsesCLI(t *testing.T) {
 	if os.Getenv("TEST_CODEX_BIN") == "" {
 		t.Skip("requires the pinned CLI")
@@ -46,6 +57,7 @@ func TestResponsesCLI(t *testing.T) {
 			Input         responseItems
 			Store, Stream bool
 			Model         string
+			Instructions  string
 			Tools         []json.RawMessage
 			Previous      string `json:"previous_response_id"`
 		}
@@ -64,23 +76,45 @@ func TestResponsesCLI(t *testing.T) {
 		if strings.Contains(full, "fixture-tool-output") && (!strings.Contains(full, "fixture-call-id") || !strings.Contains(full, "fixture-tool-start")) {
 			t.Errorf("missing call in history")
 		}
-		item := M{"id": "msg_x", "type": "message", "role": "assistant", "phase": "final_answer", "status": "completed", "content": []M{{"type": "output_text", "text": "fixture-answer", "annotations": []any{}}}}
 		var s strings.Builder
 		event := func(typ string, v M) { v["type"] = typ; fmt.Fprintf(&s, "event: %s\ndata: %s\n\n", typ, rawJSON(v)) }
 		event("response.created", M{"response": M{"id": "upstream", "status": "in_progress"}})
-		if strings.Contains(latest, "fixture-tool-start") {
+		var calls []M
+		if strings.Contains(full, "fixture-two-cities") {
+			for _, city := range []string{"Oslo", "Lima"} {
+				callID := "call_" + city
+				matches := strings.Count(full, `"call_id":"`+callID+`"`)
+				if strings.Contains(full, "weather-for-"+city) {
+					if matches != 2 {
+						t.Errorf("%s: expected one call and its result, got %d matching IDs", city, matches)
+					}
+					continue
+				}
+				if matches != 0 {
+					t.Errorf("%s: replayed a call the client did not answer", city)
+				}
+				calls = append(calls, M{"type": "function_call", "id": "fc_" + city, "call_id": callID, "name": "forecast", "arguments": string(rawJSON(M{"city": city})), "status": "completed"})
+			}
+		} else if strings.Contains(latest, "fixture-tool-start") {
 			if !strings.Contains(string(rawJSON(b.Tools)), "forecast") {
 				t.Errorf("missing tool definition")
 			}
-			item = M{"type": "function_call", "id": "fc_x", "call_id": "fixture-call-id", "name": "forecast", "arguments": `{"city":"Paris"}`, "status": "completed"}
-		} else {
+			calls = append(calls, M{"type": "function_call", "id": "fc_x", "call_id": "fixture-call-id", "name": "forecast", "arguments": `{"city":"Paris"}`, "status": "completed"})
+		}
+		if len(calls) > 0 && !strings.Contains(b.Instructions+full, "Request at most one client function at a time") {
+			t.Error("CLI did not receive the serial tool instruction")
+		}
+		if len(calls) == 0 {
 			if strings.Contains(latest, "fixture-cli-wire") && len(b.Tools) == 0 {
 				t.Errorf("CLI tool definitions missing")
 			}
 			event("response.output_item.added", M{"output_index": 0, "item": M{"type": "message", "id": "msg_x", "role": "assistant", "phase": "final_answer", "content": []any{}}})
 			event("response.output_text.delta", M{"output_index": 0, "content_index": 0, "item_id": "msg_x", "delta": "fixture-answer"})
+			event("response.output_item.done", M{"output_index": 0, "item": M{"id": "msg_x", "type": "message", "role": "assistant", "phase": "final_answer", "status": "completed", "content": []M{{"type": "output_text", "text": "fixture-answer", "annotations": []any{}}}}})
 		}
-		event("response.output_item.done", M{"output_index": 0, "item": item})
+		for i, call := range calls {
+			event("response.output_item.done", M{"output_index": i, "item": call})
+		}
 		event("response.completed", M{"response": M{"id": "upstream", "model": b.Model, "usage": M{"input_tokens": 17, "output_tokens": 101, "total_tokens": 118, "input_tokens_details": M{"cached_tokens": 4}, "output_tokens_details": M{"reasoning_tokens": 2}}}})
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, s.String())
@@ -100,7 +134,10 @@ func TestResponsesCLI(t *testing.T) {
 		}
 		return hit(t, a, "POST", path, key, string(rawJSON(b)), sid, 200)
 	}
-	first := send("fixture-tool-start", M{"tools": []M{{"type": "function", "name": "forecast", "parameters": M{"type": "object"}}}}, "")
+	first := send("fixture-tool-start", M{
+		"parallel_tool_calls": false,
+		"tools":               []M{{"type": "function", "name": "forecast", "parameters": M{"type": "object"}}},
+	}, "")
 	id := prop(first, "id")
 	if !strings.HasPrefix(id, "resp_") || !strings.Contains(first, "fixture-call-id") {
 		t.Fatal(first)
@@ -127,6 +164,39 @@ func TestResponsesCLI(t *testing.T) {
 	if err := a.db.QueryRow(`SELECT count(*) FROM requests JOIN request_metrics ON requests.id=request_id WHERE status=200 AND input=17 AND output=101 AND cached=4 AND reasoning=2 AND speed>0`).Scan(&n); err != nil || n < int(requests.Load())-1 || n > int(requests.Load()) {
 		t.Fatal(n, requests.Load(), err)
 	}
+
+	t.Run("client permits parallel calls", func(t *testing.T) {
+		body := M{"model": "gpt-5.4", "input": "fixture-two-cities", "parallel_tool_calls": true, "tools": []M{{"type": "function", "name": "forecast", "parameters": M{"type": "object"}}}}
+		seen := map[string]bool{}
+		for range 2 {
+			raw := hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+			var response struct {
+				ID       string
+				Parallel *bool `json:"parallel_tool_calls"`
+				Output   []struct {
+					Type, Arguments string
+					CallID          string `json:"call_id"`
+				}
+			}
+			if err := json.Unmarshal([]byte(raw), &response); err != nil || response.Parallel == nil || *response.Parallel || len(response.Output) != 1 {
+				t.Fatalf("expected exactly one item in serial mode: %s", raw)
+			}
+			call := response.Output[0]
+			city := prop(call.Arguments, "city")
+			if call.Type != "function_call" || city != "Oslo" && city != "Lima" || call.CallID != "call_"+city || seen[city] {
+				t.Fatalf("unexpected tool call: %+v", call)
+			}
+			seen[city] = true
+			body["previous_response_id"] = response.ID
+			body["input"] = []M{{"type": "function_call_output", "call_id": call.CallID, "output": "weather-for-" + city}}
+		}
+		body["stream"] = true
+		delete(body, "tools")
+		sse := hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+		if strings.Count(sse, `"parallel_tool_calls":false`) != 3 || !strings.Contains(sse, "fixture-answer") || !strings.Contains(sse, "event: response.completed") {
+			t.Fatal(sse)
+		}
+	})
 
 	legacy := prop(hit(t, a, "POST", "/v1/sessions", other, `{}`, "", 201), "id")
 	hit(t, a, "POST", "/v1/chat/completions", other, `{"model":"gpt-5.4","messages":[{"role":"user","content":"fixture-first"}]}`, legacy, 200)

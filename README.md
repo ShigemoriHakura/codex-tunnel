@@ -137,10 +137,12 @@ curl -fsS -H "Authorization: Bearer $DT_KEY" "$BASE/v1/usage"
 ```sh
 curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-5.4","input":"用一句话说明这个项目的用途","stream":true,"store":false}'
+  -d '{"model":"gpt-5.4","input":"用一句话说明这个项目的用途","parallel_tool_calls":false,"stream":true,"store":false}'
 ```
 
-省略 `stream` 返回一个包含 `output` 与 `usage` 的 JSON 对象。流式调用返回具名 SSE 事件，如 `response.output_text.delta`、`response.output_item.done` 和 `response.completed`。输入支持字符串、带角色的消息数组、内联 Base64 图片，以及与 `call_id` 匹配的 `function_call_output`。支持 `instructions`、`reasoning.effort` 和 `text.format` 的文本或 JSON Schema 输出。客户端可以声明非严格模式函数，每次回传一个调用结果。网关在临时 CLI 线程中重建该分支的历史，提交函数结果后让模型继续回答。未实现的参数、工具类型和强制工具选择会在请求校验时返回 400。
+省略 `stream` 返回一个包含 `output` 与 `usage` 的 JSON 对象。流式调用返回具名 SSE 事件，如 `response.output_text.delta`、`response.output_item.done` 和 `response.completed`。输入支持字符串、带角色的消息数组、内联 Base64 图片，以及与 `call_id` 匹配的 `function_call_output`。支持 `instructions`、`reasoning.effort` 和 `text.format` 的文本或 JSON Schema 输出。
+
+客户端可以声明非严格模式函数。网关每轮最多返回一个函数调用，并在 JSON 和 SSE 响应中标明 `"parallel_tool_calls": false`。客户端可省略此参数，也可发送 `false`、`true` 或 `null`，均按单工具模式处理。此设置作用于网关与客户端之间。Codex CLI 自行构造上游模型请求。将函数结果连同对应的 `call_id` 回传后，模型可以继续回答或请求下一个函数。未实现的参数、工具类型和强制工具选择会在请求校验时返回 400。
 
 使用同一密钥传入 `previous_response_id` 可以续聊或从先前的一轮分支。网关默认在本机 SQLite 保存该轮输入及输出以供续聊，独立响应 ID 的有效期为 30 天。`store:false` 关闭按响应 ID 续聊。显式会话和密钥绑定会话会保留对话，后续请求可直接发送新输入。同一会话可以混用 Responses 与 Chat Completions，沿用原有模型、并发队列、用量统计和保活设置。后台任务、托管文件和 WebSocket 传输暂未提供。
 

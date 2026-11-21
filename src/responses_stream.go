@@ -29,6 +29,7 @@ func (s *responseStream) send(kind string, fields M) error {
 
 func (s *responseStream) envelope(status string, usage any) responseFields {
 	obj := responseFields{"id": rawJSON(s.id), "object": rawJSON("response"), "status": rawJSON(status), "created_at": rawJSON(s.created), "model": rawJSON(s.model), "output": rawJSON(s.items), "usage": rawJSON(usage), "store": rawJSON(s.store), "error": rawJSON(nil)}
+	obj["parallel_tool_calls"] = rawJSON(false)
 	if s.previous != "" {
 		obj["previous_response_id"] = rawJSON(s.previous)
 	}

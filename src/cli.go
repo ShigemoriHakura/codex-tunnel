@@ -287,6 +287,7 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 	}
 	if len(t.tools) > 0 {
 		args["dynamicTools"] = t.tools
+		args["developerInstructions"] = args["developerInstructions"].(string) + "\nRequest at most one client function at a time. Wait for its result before requesting another."
 	}
 	if t.model != "" {
 		args["model"] = t.model
