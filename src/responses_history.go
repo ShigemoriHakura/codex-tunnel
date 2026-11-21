@@ -67,10 +67,10 @@ func (a *app) responseContext(ctx context.Context, b *responsesRequest, owner, s
 		if json.Unmarshal(input, &in) != nil || json.Unmarshal(output, &out) != nil {
 			return nil, errors.New("invalid saved Responses history")
 		}
-		// A public summary carries no model replay state.
+		// Public summaries and hosted search activity carry no reusable model state.
 		out = slices.DeleteFunc(out, func(raw json.RawMessage) bool {
 			var item struct{ Type string }
-			return json.Unmarshal(raw, &item) == nil && item.Type == "reasoning"
+			return json.Unmarshal(raw, &item) == nil && (item.Type == "reasoning" || item.Type == "web_search_call")
 		})
 		reverse = append(reverse, append(in, out...))
 	}

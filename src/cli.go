@@ -230,8 +230,12 @@ type turn struct {
 	instructions   string
 	effort         string
 	summary        string
+	verbosity      string
 	outputSchema   json.RawMessage
 	tools          []M
+	clientTools    map[clientToolName]clientToolName
+	webSearch      string
+	onWebSearch    func(string, bool, json.RawMessage, string, json.RawMessage) error
 	onTool         func(string, string, string, json.RawMessage) error
 	onSummary      func(string, []string) error
 	onSummaryDelta func(string, int, string) error
@@ -280,8 +284,16 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			return res, &responsesError{503, "image_tool_unavailable", "The active CLI provider does not offer its built-in image generation tool"}
 		}
 	}
-	args := M{"cwd": r.work, "sandbox": "read-only", "approvalPolicy": "never", "developerInstructions": "Answer the user's request directly. You have no local execution environment. Do not use filesystem, command, or connector tools."}
+	args := M{"cwd": r.work, "sandbox": "read-only", "approvalPolicy": "never", "developerInstructions": "Answer the user's request directly. You have no gateway execution environment. Do not use gateway filesystem, command, or connector tools."}
 	method := "thread/start"
+	config := M{"web_search": "disabled"}
+	if t.webSearch != "" {
+		config["web_search"] = t.webSearch
+	}
+	if t.verbosity != "" {
+		config["model_verbosity"] = t.verbosity
+	}
+	args["config"] = config
 	if t.image {
 		args["developerInstructions"] = "Generate one image using the built-in image generation tool. Do not use filesystem or command tools."
 	}
@@ -290,7 +302,7 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 	}
 	if len(t.tools) > 0 {
 		args["dynamicTools"] = t.tools
-		args["developerInstructions"] = args["developerInstructions"].(string) + "\nRequest at most one client function at a time. Wait for its result before requesting another."
+		args["developerInstructions"] = args["developerInstructions"].(string) + "\nThe declared client functions run on the requesting client. Request at most one client function at a time. Wait for its result before requesting another."
 	}
 	if t.model != "" {
 		args["model"] = t.model
@@ -343,6 +355,9 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			Item                            struct {
 				ID, Type, Text, Phase, Result, SavedPath, Status string
 				Summary                                          []string
+				Action                                           json.RawMessage
+				Query                                            string
+				Results                                          json.RawMessage
 			}
 			Turn struct {
 				ID, Status string
@@ -364,6 +379,9 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 				return t.onSummaryDelta(n.ItemID, n.SummaryIndex, n.Delta)
 			}
 		case "item/started":
+			if n.Item.Type == "webSearch" && t.onWebSearch != nil && n.TurnID == turnID {
+				return t.onWebSearch(n.Item.ID, false, n.Item.Action, n.Item.Query, nil)
+			}
 			if n.Item.Type == "agentMessage" && n.Item.Phase == "commentary" {
 				commentary[n.Item.ID] = true
 			}
@@ -379,6 +397,10 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			res.metered = true
 		case "item/completed":
 			switch n.Item.Type {
+			case "webSearch":
+				if t.onWebSearch != nil && n.TurnID == turnID {
+					return t.onWebSearch(n.Item.ID, true, n.Item.Action, n.Item.Query, n.Item.Results)
+				}
 			case "reasoning":
 				if t.onSummary != nil && n.TurnID == turnID {
 					return t.onSummary(n.Item.ID, n.Item.Summary)

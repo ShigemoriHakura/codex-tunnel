@@ -142,20 +142,17 @@ curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
 
 省略 `stream` 返回一个包含 `output` 与 `usage` 的 JSON 对象。流式调用返回具名 SSE 事件，如 `response.output_text.delta`、`response.output_item.done` 和 `response.completed`。输入支持字符串、带角色的消息数组、内联 Base64 图片，以及与 `call_id` 匹配的 `function_call_output`。支持 `instructions`、`reasoning.effort` 和 `text.format` 的文本或 JSON Schema 输出。
 
+支持回答详略设置的模型可使用 `text.verbosity` 指定 `low`、`medium` 或 `high`，可与 `text.format` 同时使用。
+
 桌面端可直接发送 `"reasoning":{"summary":"auto"}`，也可选 `concise`、`detailed` 或 `none`。当模型提供公开摘要时，JSON 的 `output` 中会包含带 `summary_text` 段落的 `reasoning` 项，流式客户端可读取 `response.reasoning_summary_text.delta`。最终回答仍在 `message` 项中。
 
 客户端可以发送标准 `include` 选择器，例如 `["reasoning.encrypted_content"]`。当前网关使用的 app-server 事件提供回答文本、公开摘要和用量。对于加密推理内容、逐词元对数概率等无法返回的附加字段，网关在 HTTP 响应头 `X-Codex-Tunnel-Omitted-Include` 中列出对应选择器，JSON 和 SSE 遵循相同规则。使用 `store:false` 的无状态客户端需自行回传可见对话历史，也可以绑定网关会话续聊。
 
 网关接受客户端随请求发送的 `client_metadata`（JSON 对象）和 `prompt_cache_key`（字符串），两者均可省略或设为 `null`。这两个字段仅在入口校验。上游线程标识、轮次标识和缓存键由运行在网关的 Codex CLI 管理。跨请求续聊使用 `previous_response_id`、`X-Session-ID` 或密钥绑定会话。
 
-**Codex 桌面端自定义提供方。** 保留现有网关地址、模型和密钥配置。Codex 0.171.0 默认还会声明命名空间工具和托管网页搜索。当前适配器支持推理摘要与普通非严格函数。可在使用此网关的受信任项目的 `.codex/config.toml` 中合并以下设置，适用于该项目的新会话。[Codex 配置说明](https://learn.chatgpt.com/docs/config-file/config-basic)
+Codex 桌面端使用自定义 Responses 提供方时，可以沿用默认的代理和网页搜索设置。一次请求可同时声明普通函数（`function`）、包含多个函数的命名空间（`namespace`）和托管网页搜索（`web_search`）。客户端函数在发起请求的客户端执行。网关在 JSON、流式事件和续聊历史中保留原始函数名、命名空间和 `call_id`，不同命名空间可以使用相同的函数名。
 
-```toml
-web_search = "disabled"
-
-[agents]
-enabled = false
-```
+网页搜索由网关侧的 Codex app-server 执行。`external_web_access: false` 使用缓存，`true` 使用实时搜索。`web_search_call` 输出项记录 CLI 报告的搜索操作，`include: ["web_search_call.results"]` 可请求 CLI 提供的结果。未声明网页搜索或指定 `tool_choice: "none"` 时，该轮关闭网页搜索。
 
 客户端可以声明非严格模式函数。网关每轮最多返回一个函数调用，并在 JSON 和 SSE 响应中标明 `"parallel_tool_calls": false`。客户端可省略此参数，也可发送 `false`、`true` 或 `null`，均按单工具模式处理。此设置作用于网关与客户端之间。Codex CLI 自行构造上游模型请求。将函数结果连同对应的 `call_id` 回传后，模型可以继续回答或请求下一个函数。未实现的参数、工具类型和强制工具选择会在请求校验时返回 400。
 

@@ -17,6 +17,7 @@ type responseStream struct {
 	final               responseFields
 	reasoning           M
 	pendingSummaries    []*responseSummary
+	searchItems         map[string]int
 }
 
 func (s *responseStream) send(kind string, fields M) error {
@@ -45,6 +46,11 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 	t := b.options
 	t.model = b.model
 	if err := t.responseInput(items); err != nil {
+		return result{}, err
+	}
+	var err error
+	t.history, err = nativeToolHistory(t.history)
+	if err != nil {
 		return result{}, err
 	}
 	s.items = responseItems{}
@@ -98,13 +104,23 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 	var function M
 	if len(t.tools) > 0 {
 		t.onTool = func(callID, ns, name string, args json.RawMessage) error {
-			for _, tool := range t.tools {
-				if ns == "" && tool["name"] == name {
-					function = M{"type": "function_call", "id": id("fc_"), "call_id": callID, "name": name, "arguments": string(args), "status": "completed"}
-					return nil
-				}
+			tool, ok := t.clientTools[clientToolName{ns, name}]
+			if !ok {
+				return &responsesError{502, "unexpected_tool", "CLI requested a tool outside the client definitions"}
 			}
-			return &responsesError{502, "unexpected_tool", "CLI requested a tool outside the client definitions"}
+			function = M{"type": "function_call", "id": id("fc_"), "call_id": callID, "name": tool.Name, "arguments": string(args), "status": "completed"}
+			if tool.Namespace != "" {
+				function["namespace"] = tool.Namespace
+			}
+			return nil
+		}
+	}
+	if t.webSearch != "" {
+		t.onWebSearch = func(key string, done bool, action json.RawMessage, query string, results json.RawMessage) error {
+			if !b.searchResults {
+				results = nil
+			}
+			return s.webSearchItem(key, done, action, query, results)
 		}
 	}
 	res, err := run.run(ctx, a.servers, t)
@@ -112,6 +128,9 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 		return res, err
 	}
 	// A tool handoff can interrupt the CLI before all item completions arrive.
+	if err := s.finishPendingSearches(); err != nil {
+		return res, err
+	}
 	for len(s.pendingSummaries) > 0 {
 		if err := s.finishSummary(s.pendingSummaries[0].cliID, nil); err != nil {
 			return res, err
@@ -146,6 +165,9 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 	if function != nil {
 		index := len(s.items)
 		start := M{"id": function["id"], "call_id": function["call_id"], "type": "function_call", "name": function["name"], "arguments": "", "status": "in_progress"}
+		if ns, ok := function["namespace"]; ok {
+			start["namespace"] = ns
+		}
 		if err := s.send("response.output_item.added", M{"output_index": index, "item": start}); err != nil {
 			return res, err
 		}

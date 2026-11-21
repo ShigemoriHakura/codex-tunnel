@@ -34,6 +34,51 @@ func TestResponsesParallelToolCallsOption(t *testing.T) {
 	}
 }
 
+func TestResponsesToolDeclarations(t *testing.T) {
+	for _, tc := range []struct{ declarations, problem string }{
+		{`{"type":"function"}`, "array"},
+		{`[{"type":"custom"}]`, "custom at tools[0]"},
+		{`[{"type":"function","name":"lookup"},{"type":"function","name":"lookup"}]`, "Duplicate function at tools[1]"},
+		{`[{"type":"namespace","name":"tasks","tools":[{"type":"function","name":"lookup","parameters":false}]}]`, "tools[0].tools[0].parameters"},
+		{`[{"type":"web_search","unknown_toggle":true}]`, "tools[0].unknown_toggle"},
+	} {
+		_, err := parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON("x"), "tools": json.RawMessage(tc.declarations)})
+		if err == nil || !strings.Contains(err.Error(), tc.problem) {
+			t.Errorf("tools=%s: expected %q, got %v", tc.declarations, tc.problem, err)
+		}
+	}
+}
+
+func TestResponsesTextVerbosity(t *testing.T) {
+	for _, verbosity := range []string{"low", "medium", "high", "invalid"} {
+		options := M{"verbosity": verbosity, "format": M{"type": "json_schema", "schema": M{"type": "object"}}}
+		b, err := parseResponses(responseFields{"model": rawJSON("fixture"), "input": rawJSON("x"), "text": rawJSON(options)})
+		if verbosity == "invalid" {
+			if err == nil {
+				t.Fatal("accepted invalid verbosity")
+			}
+		} else if err != nil || b.options.verbosity != verbosity || b.options.outputSchema == nil {
+			t.Fatalf("verbosity=%s: %v", verbosity, err)
+		}
+	}
+}
+
+func TestResponsesWebSearchLifecycle(t *testing.T) {
+	s := &responseStream{}
+	if err := s.webSearchItem("pending", false, nil, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.webSearchItem("finished", true, rawJSON(M{"type": "openPage", "url": "https://example.org"}), "", rawJSON([]M{{"title": "fixture"}})); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.finishPendingSearches(); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.items) != 2 || prop(string(s.items[0]), "status") != "incomplete" || prop(string(s.items[1]), "status") != "completed" || !strings.Contains(string(s.items[1]), `"type":"open_page"`) || !strings.Contains(string(s.items[1]), `"results":[`) {
+		t.Fatalf("unexpected web search output: %s", s.items)
+	}
+}
+
 func TestResponsesIncludeValidation(t *testing.T) {
 	for _, option := range []string{
 		"null", "[]", `["reasoning.encrypted_content","reasoning.encrypted_content"]`,
@@ -150,6 +195,25 @@ func TestResponsesCLI(t *testing.T) {
 		event := func(typ string, v M) { v["type"] = typ; fmt.Fprintf(&s, "event: %s\ndata: %s\n\n", typ, rawJSON(v)) }
 		event("response.created", M{"response": M{"id": "upstream", "status": "in_progress"}})
 		var calls []M
+		if strings.Contains(latest, "fixture-desktop-") {
+			specs := string(rawJSON(b.Tools))
+			switch {
+			case strings.Contains(latest, "fixture-desktop-disabled"):
+				if strings.Contains(specs, "ct_lookup") || strings.Contains(specs, `"type":"web_search"`) {
+					t.Error("tool_choice none leaked tools from another request")
+				}
+			default:
+				if !strings.Contains(specs, `"name":"ct_alpha"`) || !strings.Contains(specs, `"name":"ct_beta"`) || !strings.Contains(specs, `"type":"web_search"`) || !strings.Contains(specs, `"external_web_access":false`) {
+					t.Errorf("expected both client namespaces and cached hosted search, got: %s", specs)
+				}
+			}
+			if strings.Contains(latest, "fixture-desktop-call") {
+				calls = append(calls, M{"type": "function_call", "id": "fc_lookup", "call_id": "call_lookup", "name": "ct_lookup", "namespace": "ct_beta", "arguments": `{"value":"test"}`})
+			}
+		}
+		if strings.Contains(latest, "lookup-result") && (!strings.Contains(full, `"namespace":"ct_beta"`) || !strings.Contains(full, `"name":"ct_lookup"`)) {
+			t.Error("namespaced call lost its identity during replay")
+		}
 		if strings.Contains(full, "fixture-two-cities") {
 			for _, city := range []string{"Oslo", "Lima"} {
 				callID := "call_" + city
@@ -163,13 +227,13 @@ func TestResponsesCLI(t *testing.T) {
 				if matches != 0 {
 					t.Errorf("%s: replayed a call the client did not answer", city)
 				}
-				calls = append(calls, M{"type": "function_call", "id": "fc_" + city, "call_id": callID, "name": "forecast", "arguments": string(rawJSON(M{"city": city})), "status": "completed"})
+				calls = append(calls, M{"type": "function_call", "id": "fc_" + city, "call_id": callID, "name": "ct_forecast", "arguments": string(rawJSON(M{"city": city})), "status": "completed"})
 			}
 		} else if strings.Contains(latest, "fixture-tool-start") {
 			if !strings.Contains(string(rawJSON(b.Tools)), "forecast") {
 				t.Errorf("missing tool definition")
 			}
-			calls = append(calls, M{"type": "function_call", "id": "fc_x", "call_id": "fixture-call-id", "name": "forecast", "arguments": `{"city":"Paris"}`, "status": "completed"})
+			calls = append(calls, M{"type": "function_call", "id": "fc_x", "call_id": "fixture-call-id", "name": "ct_forecast", "arguments": `{"city":"Paris"}`, "status": "completed"})
 		}
 		if len(calls) > 0 && !strings.Contains(b.Instructions+full, "Request at most one client function at a time") {
 			t.Error("CLI did not receive the serial tool instruction")
@@ -180,6 +244,11 @@ func TestResponsesCLI(t *testing.T) {
 			}
 			index := 0
 			part := M{"type": "output_text", "text": "fixture-answer", "annotations": []any{}}
+			if strings.Contains(latest, "fixture-desktop-search") {
+				event("response.output_item.added", M{"output_index": index, "item": M{"type": "web_search_call", "id": "ws_fixture", "status": "in_progress"}})
+				event("response.output_item.done", M{"output_index": index, "item": M{"type": "web_search_call", "id": "ws_fixture", "status": "completed", "action": M{"type": "search", "query": "fixture search"}}})
+				index++
+			}
 			if strings.Contains(latest, "fixture-wants-summary") {
 				if b.Reasoning.Summary != "auto" || b.Reasoning.Effort != "high" {
 					t.Errorf("unexpected provider reasoning options %+v", b.Reasoning)
@@ -256,6 +325,35 @@ func TestResponsesCLI(t *testing.T) {
 	if err := a.db.QueryRow(`SELECT count(*) FROM requests JOIN request_metrics ON requests.id=request_id WHERE status=200 AND input=17 AND output=101 AND cached=4 AND reasoning=2 AND speed>0`).Scan(&n); err != nil || n < int(requests.Load())-1 || n > int(requests.Load()) {
 		t.Fatal(n, requests.Load(), err)
 	}
+
+	t.Run("desktop tools", func(t *testing.T) {
+		child := M{"type": "function", "name": "lookup", "parameters": M{"type": "object", "properties": M{"value": M{"type": "string"}}}}
+		specs := []M{{"type": "namespace", "name": "alpha", "description": "first", "tools": []M{child}}, {"type": "namespace", "name": "beta", "description": "second", "tools": []M{child}}, {"type": "web_search", "external_web_access": false}}
+		body := M{"model": "gpt-5.4", "input": "fixture-desktop-call", "tools": specs}
+		for _, stream := range []bool{false, true} {
+			body["stream"] = stream
+			call := hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+			if !strings.Contains(call, `"namespace":"beta"`) || !strings.Contains(call, `"name":"lookup"`) || !strings.Contains(call, "call_lookup") || strings.Contains(call, "ct_beta") {
+				t.Fatalf("bad client tool handoff: %s", call)
+			}
+			if stream {
+				if strings.Count(call, `"namespace":"beta"`) != 3 {
+					t.Fatalf("namespace missing from streaming items: %s", call)
+				}
+			} else {
+				followup := M{"model": "gpt-5.4", "previous_response_id": prop(call, "id"), "input": []M{{"type": "function_call_output", "call_id": "call_lookup", "output": "lookup-result"}}}
+				hit(t, a, "POST", path, key, string(rawJSON(followup)), "", 404)
+				hit(t, a, "POST", path, other, string(rawJSON(followup)), "", 200)
+			}
+		}
+		body["input"] = "fixture-desktop-search"
+		search := hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+		if !strings.Contains(search, "event: response.web_search_call.completed") || !strings.Contains(search, `"query":"fixture search"`) || !strings.Contains(search, `"output_index":1`) {
+			t.Fatalf("missing search output: %s", search)
+		}
+		body["input"], body["tool_choice"] = "fixture-desktop-disabled", "none"
+		hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+	})
 
 	t.Run("public reasoning summary", func(t *testing.T) {
 		body := M{"model": "gpt-5.4", "input": "fixture-wants-summary", "reasoning": M{"effort": "high", "summary": "auto"}}

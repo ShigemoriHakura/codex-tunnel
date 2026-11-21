@@ -25,6 +25,7 @@ type responsesRequest struct {
 	options                 turn
 	input                   responseItems
 	omittedIncludes         []string
+	searchResults           bool
 	model, previous, parent string
 	stream, store           bool
 }
@@ -91,14 +92,23 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 			b.options.effort = reasoning.Effort
 		case "text":
 			var text struct {
-				Format *struct {
+				Verbosity *string
+				Format    *struct {
 					Type, Name, Description string
 					Strict                  *bool
 					Schema                  json.RawMessage
 				}
 			}
 			if strictOption(v, &text) != nil {
-				return nil, invalidResponse("Invalid text.format")
+				return nil, invalidResponse("Invalid text options")
+			}
+			if text.Verbosity != nil {
+				switch *text.Verbosity {
+				case "low", "medium", "high":
+					b.options.verbosity = *text.Verbosity
+				default:
+					return nil, invalidResponse("text.verbosity must be low, medium, high or null")
+				}
 			}
 			if f := text.Format; f != nil {
 				switch f.Type {
@@ -124,12 +134,13 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 			if json.Unmarshal(v, &selectors) != nil {
 				return nil, invalidResponse("include must be an array of selector strings or null")
 			}
-			// The public app-server events used by this adapter expose none of
-			// these optional fields. Keep requests usable and report the omissions.
+			// Return optional fields available on public app-server events.
 			for _, selector := range selectors {
 				switch selector {
+				case "web_search_call.results":
+					b.searchResults = true
 				case "reasoning.encrypted_content", "message.output_text.logprobs", "message.input_image.image_url",
-					"web_search_call.action.sources", "web_search_call.results", "file_search_call.results",
+					"web_search_call.action.sources", "file_search_call.results",
 					"computer_call_output.output.image_url", "code_interpreter_call.outputs":
 					if !slices.Contains(b.omittedIncludes, selector) {
 						b.omittedIncludes = append(b.omittedIncludes, selector)
@@ -180,15 +191,15 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 	if len(b.input) == 0 && b.previous == "" {
 		return nil, invalidResponse("Provide at least one input item")
 	}
-	// Public summaries are display items. Desktop clients may echo them when
-	// replaying a transcript. Only messages and tool exchanges enter a new CLI thread.
+	// Desktop clients can echo public summaries and hosted search activity.
+	// Only messages and client tool exchanges enter a fresh CLI thread.
 	replay := b.input[:0]
 	for _, v := range b.input {
 		var i struct {
-			Type, Role, Name string
-			CallID           string `json:"call_id"`
-			Content          json.RawMessage
-			Output           json.RawMessage
+			Type, Role, Name, Namespace string
+			CallID                      string `json:"call_id"`
+			Content                     json.RawMessage
+			Output                      json.RawMessage
 		}
 		if json.Unmarshal(v, &i) != nil {
 			return nil, invalidResponse("Invalid input item")
@@ -236,6 +247,10 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 				}
 			}
 			continue
+		case "web_search_call":
+			// Hosted activity is displayed by the client. Its remote item ID cannot
+			// be resolved in the fresh CLI thread used for a continuation.
+			continue
 		case "function_call_output":
 			if i.CallID == "" {
 				return nil, invalidResponse("function_call_output requires a call_id")
@@ -253,7 +268,7 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 		replay = append(replay, v)
 	}
 	if len(b.input) > 0 && len(replay) == 0 {
-		return nil, invalidResponse("Provide a user message or tool result with the summary")
+		return nil, invalidResponse("Provide a user message or tool result with replayed display items")
 	}
 	b.input = replay
 	if err := b.parseTools(f); err != nil {
@@ -301,40 +316,4 @@ func strictOption(v json.RawMessage, dest any) error {
 	d := json.NewDecoder(bytes.NewReader(v))
 	d.DisallowUnknownFields()
 	return d.Decode(dest)
-}
-
-func (b *responsesRequest) parseTools(f responseFields) error {
-	type definition struct {
-		Type, Name, Description string
-		Parameters              json.RawMessage
-		Strict                  *bool
-	}
-	var tools []definition
-	if raw := f["tools"]; len(raw) != 0 && strictOption(raw, &tools) != nil {
-		return invalidResponse("tools must be an array of function definitions")
-	}
-	names := map[string]bool{}
-	for _, tool := range tools {
-		if tool.Type != "function" || !responseFieldName.MatchString(tool.Name) || names[tool.Name] || tool.Strict != nil && *tool.Strict {
-			return invalidResponse("The CLI adapter supports uniquely named, non-strict function tools")
-		}
-		names[tool.Name] = true
-		if tool.Parameters == nil {
-			tool.Parameters = rawJSON(M{"type": "object", "properties": M{}})
-		}
-		if tool.Parameters[0] != '{' {
-			return invalidResponse("function parameters must be a JSON Schema object")
-		}
-		b.options.tools = append(b.options.tools, M{"type": "function", "name": tool.Name, "description": tool.Description, "inputSchema": tool.Parameters})
-	}
-	if raw := f["tool_choice"]; len(raw) != 0 {
-		var choice string
-		if json.Unmarshal(raw, &choice) != nil || choice != "auto" && choice != "none" {
-			return invalidResponse("The CLI adapter supports tool_choice auto and none")
-		}
-		if choice == "none" {
-			b.options.tools = nil
-		}
-	}
-	return nil
 }
