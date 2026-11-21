@@ -48,11 +48,6 @@ func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest,
 	if err := t.responseInput(items); err != nil {
 		return result{}, err
 	}
-	var err error
-	t.history, err = nativeToolHistory(t.history)
-	if err != nil {
-		return result{}, err
-	}
 	s.items = responseItems{}
 	if t.effort != "" || t.summary != "" {
 		s.reasoning = M{}

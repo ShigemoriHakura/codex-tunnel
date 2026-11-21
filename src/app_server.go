@@ -228,7 +228,7 @@ func (s *appServer) dispatch(v packet) bool {
 		return true
 	}
 	switch v.Method {
-	case "item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/summaryTextDelta", "thread/tokenUsage/updated", "turn/completed":
+	case "error", "model/rerouted", "item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/summaryTextDelta", "thread/tokenUsage/updated", "turn/completed":
 	default:
 		return true
 	}

@@ -43,6 +43,7 @@ func openDB(dir string) (*sql.DB, error) {
  CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,owner TEXT NOT NULL,session TEXT NOT NULL,kind TEXT NOT NULL,model TEXT NOT NULL,status INTEGER NOT NULL,input INTEGER NOT NULL,output INTEGER NOT NULL,metered INTEGER NOT NULL,latency_ms INTEGER NOT NULL,created INTEGER NOT NULL);
  CREATE INDEX IF NOT EXISTS requests_owner ON requests(owner,created DESC);
  CREATE INDEX IF NOT EXISTS requests_created ON requests(created DESC);
+ CREATE TABLE IF NOT EXISTS cyber_replay_blocks(fingerprint BLOB PRIMARY KEY,expires INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS console_sessions(digest TEXT PRIMARY KEY,expires INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);`)
 	if err != nil {

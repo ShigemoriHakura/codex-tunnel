@@ -220,6 +220,21 @@ func TestResponsesCLI(t *testing.T) {
 		}
 		latest := string(b.Input[len(b.Input)-1])
 		full := string(rawJSON(b.Input))
+		if strings.Contains(latest, "fixture-invalid-item-id-error") {
+			jsonOut(w, 400, M{"error": M{"type": "invalid_request_error", "code": "unsupported_parameter", "param": "input", "message": "This request does not support user-supplied input item IDs."}})
+			return
+		}
+		if strings.Contains(latest, "fixture-policy-block") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "event: response.failed\ndata: "+string(rawJSON(M{"type": "response.failed", "response": M{"id": "fixture-block", "status": "failed", "error": M{"code": "cyber_policy", "message": "synthetic policy signal"}}}))+"\n\n")
+			return
+		}
+		for _, raw := range b.Input {
+			itemID := prop(string(raw), "id")
+			if strings.Contains(itemID, "_fixture_foreign_") || strings.HasPrefix(itemID, "fc_") && len(itemID) == len("fc_")+48 {
+				t.Error("client or gateway item ID reached the upstream provider")
+			}
+		}
 		if strings.Contains(full, "fixture-public-summary") {
 			t.Error("display summary was injected as model context")
 		}
@@ -395,6 +410,41 @@ func TestResponsesCLI(t *testing.T) {
 		t.Fatal(n, requests.Load(), err)
 	}
 
+	t.Run("terminal cyber policy and replay guard", func(t *testing.T) {
+		before := requests.Load()
+		body := M{"model": "gpt-5.4", "input": "fixture-policy-block", "stream": true}
+		wire := hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+		if strings.Count(wire, "event: response.failed") != 1 || !strings.Contains(wire, `"code":"cyber_policy"`) || strings.Contains(wire, "event: response.completed") || requests.Load() != before+1 {
+			t.Fatalf("unexpected policy termination: %s (provider calls %d)", wire, requests.Load()-before)
+		}
+		body["stream"], body["client_metadata"] = false, M{"thread_id": "new-attempt"}
+		replay := hit(t, a, "POST", path, other, string(rawJSON(body)), "", 400)
+		if !strings.Contains(replay, `"code":"cyber_policy"`) || requests.Load() != before+1 {
+			t.Fatal("blocked request was forwarded again")
+		}
+		body["input"] = "discuss the word cyber_policy in a normal message"
+		hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+		if requests.Load() != before+2 {
+			t.Fatal("unrelated input was blocked")
+		}
+	})
+
+	t.Run("terminal upstream 400", func(t *testing.T) {
+		body := M{"model": "gpt-5.4", "input": "fixture-invalid-item-id-error", "stream": true}
+		wire := hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+		if !strings.Contains(wire, "event: response.failed") || !strings.Contains(wire, `"code":"invalid_prompt"`) || strings.Contains(wire, `"code":"cyber_policy"`) {
+			t.Fatal(wire)
+		}
+	})
+
+	t.Run("client item IDs in replay", func(t *testing.T) {
+		body := M{"model": "gpt-5.4", "input": []M{
+			{"type": "message", "role": "user", "id": "msg_fixture_foreign_message", "content": "fixture ID regression"},
+			{"type": "function_call", "id": "fc_fixture_foreign_call", "name": "lookup", "call_id": "fixture-call-link", "arguments": "{}"},
+			{"type": "function_call_output", "id": "fco_fixture_foreign_result", "call_id": "fixture-call-link", "output": "fixture result"},
+		}}
+		hit(t, a, "POST", path, other, string(rawJSON(body)), "", 200)
+	})
 	t.Run("desktop tools", func(t *testing.T) {
 		child := M{"type": "function", "name": "lookup", "parameters": M{"type": "object", "properties": M{"value": M{"type": "string"}}}}
 		specs := []M{{"type": "namespace", "name": "alpha", "description": "first", "tools": []M{child}}, {"type": "namespace", "name": "beta", "description": strings.Repeat("界", 1024) + "fixture-namespace-tail", "tools": []M{child}}, {"type": "web_search", "external_web_access": false}}

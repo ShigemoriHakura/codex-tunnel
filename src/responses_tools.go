@@ -242,41 +242,40 @@ func webSearchMode(raw json.RawMessage, path string) (string, error) {
 	return "live", nil
 }
 
-func nativeToolHistory(items responseItems) (responseItems, error) {
-	var history responseItems
-	for i, raw := range items {
-		var call struct{ Type, Name, Namespace string }
-		if err := json.Unmarshal(raw, &call); err != nil {
-			return nil, err
-		}
-		if call.Type != "function_call" && call.Type != "custom_tool_call" && call.Type != "custom_tool_call_output" {
-			continue
-		}
-		if history == nil {
-			history = append(responseItems(nil), items...)
-		}
+// Inject replayed content into a fresh CLI thread. Item IDs belong to the
+// originating Responses request; call_id still links each tool result to its call.
+func cliReplayItems(items responseItems) (responseItems, error) {
+	history := make(responseItems, 0, len(items))
+	for _, raw := range items {
 		var item responseFields
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return nil, err
 		}
-		switch call.Type {
+		delete(item, "id")
+		var kind string
+		if err := json.Unmarshal(item["type"], &kind); err != nil {
+			return nil, err
+		}
+		switch kind {
 		case "custom_tool_call_output":
-			history[i] = rawJSON(responseFields{"type": rawJSON("function_call_output"), "call_id": item["call_id"], "output": item["output"]})
-			continue
+			item = responseFields{"type": rawJSON("function_call_output"), "call_id": item["call_id"], "output": item["output"]}
 		case "custom_tool_call":
 			item["type"] = rawJSON("function_call")
 			item["arguments"] = rawJSON(string(rawJSON(responseFields{"input": item["input"]})))
 			delete(item, "input")
+			fallthrough
+		case "function_call":
+			var call clientToolName
+			if err := json.Unmarshal(raw, &call); err != nil {
+				return nil, err
+			}
+			native := call.native()
+			item["name"] = rawJSON(native.Name)
+			if native.Namespace != "" {
+				item["namespace"] = rawJSON(native.Namespace)
+			}
 		}
-		native := (clientToolName{call.Namespace, call.Name}).native()
-		item["name"] = rawJSON(native.Name)
-		if native.Namespace != "" {
-			item["namespace"] = rawJSON(native.Namespace)
-		}
-		history[i] = rawJSON(item)
-	}
-	if history == nil {
-		return items, nil
+		history = append(history, rawJSON(item))
 	}
 	return history, nil
 }

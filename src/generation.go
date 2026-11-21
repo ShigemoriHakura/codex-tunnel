@@ -59,7 +59,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	t := turn{image: image, persist: sid != ""}
 	var output imageOutput
 	var imageParams imageRequest
-	reply := generationResponse{w: w, image: image, responses: responses}
+	reply := generationResponse{w: w, image: image}
 	stream, includeUsage := false, false
 	kind := "chat"
 	rid := id("chatcmpl-")
@@ -175,6 +175,12 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		trace.model = t.model
 		trace.stream = &stream
 	}
+	requestedModel := t.model
+	outputStream := responseStream{id: rid, stream: responses && stream, reply: &reply, model: t.model, created: start.Unix(), items: responseItems{}}
+	if responses {
+		reply.responses = &outputStream
+		outputStream.store, outputStream.previous = native.store, native.previous
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 	reply.jsonBody = !stream
@@ -286,6 +292,9 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 				contextItems = append(prefix, contextItems...)
 			}
 		}
+		if e == nil {
+			contextItems, e = cliReplayItems(contextItems)
+		}
 		if e != nil {
 			var bad *responsesError
 			if errors.As(e, &bad) {
@@ -322,13 +331,34 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 			return send(chunk(M{"content": d}, nil))
 		}
 	}
+	var policyInput any = t.input
+	var instructions string
+	var tools []M
+	if native != nil {
+		policyInput, instructions, tools, head = contextItems, native.options.instructions, native.options.tools, native.parent
+	} else if chat != nil {
+		policyInput = chat.input
+	}
+	policyKey := cyberReplayKey(owner, sid, r.URL.Path, requestedModel, head, policyInput, instructions, tools)
+	blocked, err := cyberReplayBlocked(ctx, a.db, policyKey)
+	if err != nil {
+		reject(500, "storage_error", "Could not check the request retry state")
+		return
+	}
+	if blocked {
+		reject(errCyberPolicy.status, errCyberPolicy.code, "Codex already stopped this request for cybersecurity risk. The gateway did not resend it.")
+		return
+	}
+	t.onCyberPolicy = func() {
+		if err := rememberCyberBlock(a.db, policyKey); err != nil {
+			log.Printf("save cyber retry block: %v", err)
+		}
+	}
 	upstreamStart := time.Now()
 	var res result
 	var runErr error
-	outputStream := responseStream{id: rid, stream: responses && stream, reply: &reply, model: t.model, created: start.Unix()}
 	if native != nil {
-		outputStream.store = native.store
-		outputStream.previous = native.previous
+		native.options.onCyberPolicy = t.onCyberPolicy
 		res, runErr = a.runResponses(ctx, run, native, contextItems, &outputStream, t.delta)
 		prior = counts{} // Each Responses request replays its owned context in an ephemeral CLI thread.
 	} else {
@@ -429,6 +459,10 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 	}
 	if e != nil {
 		log.Printf("save generation usage: %v", e)
+		if errors.Is(runErr, errCyberPolicy) {
+			reply.reject(errCyberPolicy.status, errCyberPolicy.code, errCyberPolicy.message)
+			return
+		}
 		reply.reject(500, "storage_error", "Could not save request usage")
 		return
 	}

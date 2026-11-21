@@ -235,6 +235,7 @@ type turn struct {
 	tools          []M
 	clientTools    map[clientToolName]clientTool
 	webSearch      string
+	onCyberPolicy  func()
 	onWebSearch    func(string, bool, json.RawMessage, string, json.RawMessage) error
 	onTool         func(string, string, string, json.RawMessage) error
 	onSummary      func(string, []string) error
@@ -334,6 +335,9 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 	var turnID string
 	done := false
 	defer func() {
+		if errors.Is(err, errCyberPolicy) && t.onCyberPolicy != nil {
+			t.onCyberPolicy()
+		}
 		if !p.finishThread(thread, turnID, done, inbox) {
 			retire = true
 		}
@@ -352,6 +356,8 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 		var n struct {
 			ThreadID, TurnID, ItemID, Delta string
 			SummaryIndex                    int
+			Error                           cliTurnError
+			Reason                          string
 			Item                            struct {
 				ID, Type, Text, Phase, Result, SavedPath, Status string
 				Summary                                          []string
@@ -361,9 +367,7 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			}
 			Turn struct {
 				ID, Status string
-				Error      struct {
-					Info json.RawMessage `json:"codexErrorInfo"`
-				}
+				Error      cliTurnError
 			}
 			TokenUsage struct{ Total counts }
 		}
@@ -374,6 +378,14 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			return nil
 		}
 		switch v.Method {
+		case "error":
+			if n.TurnID == turnID && n.Error.isCyberPolicy() {
+				return errCyberPolicy
+			}
+		case "model/rerouted":
+			if n.TurnID == turnID && n.Reason == "highRiskCyberActivity" {
+				return errCyberPolicy
+			}
 		case "item/reasoning/summaryTextDelta":
 			if t.onSummaryDelta != nil && n.TurnID == turnID && n.Delta != "" {
 				return t.onSummaryDelta(n.ItemID, n.SummaryIndex, n.Delta)
@@ -421,7 +433,7 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			}
 			done = true
 			if n.Turn.Status != "completed" {
-				return cliTurnFailure(n.Turn.Status, n.Turn.Error.Info)
+				return cliTurnFailure(n.Turn.Status, n.Turn.Error)
 			}
 		}
 		return nil
@@ -479,15 +491,38 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 	}
 	return res, nil
 }
-func cliTurnFailure(status string, info json.RawMessage) error {
+
+type cliTurnError struct {
+	Info    json.RawMessage `json:"codexErrorInfo"`
+	Message string
+}
+
+func (e cliTurnError) isCyberPolicy() bool { return string(e.Info) == `"cyberPolicy"` }
+
+func cliTurnFailure(status string, detail cliTurnError) error {
+	if detail.isCyberPolicy() {
+		return errCyberPolicy
+	}
+	var transport map[string]struct {
+		Status int `json:"httpStatusCode"`
+	}
+	_ = json.Unmarshal(detail.Info, &transport)
+	for _, kind := range []string{"httpConnectionFailed", "responseStreamConnectionFailed", "responseStreamDisconnected", "responseTooManyFailedAttempts"} {
+		if transport[kind].Status == 400 {
+			if strings.Contains(detail.Message, "This request does not support user-supplied input item IDs.") {
+				return invalidResponse("The provider rejected a supplied input item ID in the replayed history")
+			}
+			return invalidResponse("The CLI provider rejected the request (HTTP 400)")
+		}
+	}
 	var code string
-	_ = json.Unmarshal(info, &code)
+	_ = json.Unmarshal(detail.Info, &code)
 	switch code {
 	case "usageLimitExceeded", "rateLimitExceeded", "sessionBudgetExceeded":
 		return &responsesError{429, "rate_limit_exceeded", "The CLI reported an upstream usage limit"}
 	case "contextWindowExceeded":
 		return &responsesError{400, "context_length_exceeded", "The conversation exceeds the model context window"}
-	case "badRequest":
+	case "badRequest", "invalidPrompt":
 		return &responsesError{400, "invalid_request", "The CLI provider rejected the request"}
 	case "modelNotFound":
 		return &responsesError{404, "model_not_found", "The CLI provider could not find the requested model"}

@@ -16,7 +16,7 @@ type generationResponse struct {
 	opened    bool
 	jsonBody  bool
 	image     bool
-	responses bool
+	responses *responseStream
 	sequence  int
 }
 
@@ -118,13 +118,35 @@ func (s *generationResponse) reject(status int, code, message string) {
 	if status == 499 {
 		return
 	}
-	if !s.opened || s.jsonBody {
+	if !s.opened {
+		if code == errCyberPolicy.code {
+			s.w.Header().Set("X-Should-Retry", "false")
+		}
 		fail(s.w, status, code, message)
 		return
 	}
+	if s.jsonBody {
+		_ = s.finishJSON(M{"error": M{"code": code, "message": message}})
+		return
+	}
 	detail := M{"code": code, "message": message}
-	if s.responses {
-		s.write("error", M{"type": "error", "sequence_number": s.sequence, "code": code, "message": message, "param": nil})
+	if s.responses != nil {
+		// Codex treats a bare error event followed by EOF as a disconnected
+		// stream. response.failed is the terminal Responses event for failures.
+		if status == 400 && code == "invalid_request" {
+			detail["code"] = "invalid_prompt"
+		}
+		response := s.responses.envelope("failed", nil)
+		response["error"] = rawJSON(detail)
+		// A reserved output slot can still be empty when a live item fails.
+		output := make(responseItems, 0, len(s.responses.items))
+		for _, item := range s.responses.items {
+			if item != nil {
+				output = append(output, item)
+			}
+		}
+		response["output"] = rawJSON(output)
+		_ = s.responses.send("response.failed", M{"response": response})
 	} else if s.image {
 		s.write("error", M{"type": "error", "error": detail})
 	} else {

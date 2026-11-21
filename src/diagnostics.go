@@ -144,7 +144,7 @@ func (a *app) saveTrace(t *requestTrace, method, path string) error {
 	defer tx.Rollback()
 	if t.status >= 400 {
 		source := "gateway"
-		if t.code == "upstream_error" || t.code == "image_unavailable" {
+		if t.code == "upstream_error" || t.code == "image_unavailable" || t.code == "cyber_policy" {
 			source = "codex"
 		}
 		if t.code == "storage_error" {

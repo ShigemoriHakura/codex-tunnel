@@ -142,6 +142,10 @@ curl -N "$BASE/v1/responses" -H "Authorization: Bearer $DT_KEY" \
 
 省略 `stream` 返回一个包含 `output` 与 `usage` 的 JSON 对象。流式调用返回具名 SSE 事件，如 `response.output_text.delta`、`response.output_item.done` 和 `response.completed`。输入支持字符串、带角色的消息数组、内联 Base64 图片，以及与 `call_id` 匹配的 `function_call_output`。支持 `instructions`、`reasoning.effort` 和 `text.format` 的文本或 JSON Schema 输出。
 
+流式 Responses 请求在上游失败时以 `response.failed` 结束。明确的 Cyber 拦截或高风险 Cyber 改路通知会终止当前轮次，并返回 `cyber_policy`。网关按密钥、会话、路由和请求内容保存指纹，24 小时内重复提交会在本地被拒绝。未开始发送响应时返回 HTTP 400 和 `X-Should-Retry: false`。普通断流按传输故障处理。
+
+续聊时，网关在向新 CLI 线程注入历史前移除输入项的外部 `id`，保留工具调用及结果的 `call_id`。
+
 支持回答详略设置的模型可使用 `text.verbosity` 指定 `low`、`medium` 或 `high`，可与 `text.format` 同时使用。桌面端可发送 `reasoning.context: "all_turns"`，网关侧的 CLI 会根据模型能力选择上游推理上下文模式。
 
 桌面端可直接发送 `"reasoning":{"summary":"auto"}`，也可选 `concise`、`detailed` 或 `none`。当模型提供公开摘要时，JSON 的 `output` 中会包含带 `summary_text` 段落的 `reasoning` 项，流式客户端可读取 `response.reasoning_summary_text.delta`。最终回答仍在 `message` 项中。
