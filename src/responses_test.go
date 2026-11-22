@@ -206,6 +206,15 @@ func TestResponsesReasoningHistory(t *testing.T) {
 		t.Fatalf("item_reference was not safely skipped: %v", err)
 	}
 	for _, item := range []M{
+		{"type": "agent_message", "author": "agent-a", "recipient": "agent-b", "content": []M{{"type": "input_text", "text": "fixture handoff"}}},
+		{"type": "agent_message", "author": "agent-a", "recipient": "agent-b", "content": []M{{"type": "encrypted_content", "encrypted_content": "fixture ciphertext"}}},
+	} {
+		b, err := parse([]M{item, {"role": "user", "content": "continue"}})
+		if err != nil || len(b.input) != 1 || prop(string(b.input[0]), "role") != "user" {
+			t.Fatalf("agent_message was not safely skipped: %v", err)
+		}
+	}
+	for _, item := range []M{
 		{"type": "reasoning", "summary": []M{{"type": "summary_text"}}},
 		{"type": "reasoning", "content": "invalid"},
 		{"type": "reasoning", "encrypted_content": 1},

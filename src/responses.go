@@ -269,6 +269,36 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 				return nil, invalidResponse("item_reference requires an id")
 			}
 			continue
+		case "agent_message":
+			// Codex can include internal multi-agent messages in a desktop
+			// transcript. They are not user-visible model context and can contain
+			// encrypted inter-agent data, so never replay them into the CLI thread.
+			var item struct {
+				Author, Recipient string
+				Content           []struct {
+					Type      string
+					Text      *string
+					Encrypted *string `json:"encrypted_content"`
+				}
+			}
+			if json.Unmarshal(v, &item) != nil {
+				return nil, invalidResponse("Invalid agent_message item")
+			}
+			for _, part := range item.Content {
+				switch part.Type {
+				case "input_text":
+					if part.Text == nil {
+						return nil, invalidResponse("agent_message input_text requires text")
+					}
+				case "encrypted_content":
+					if part.Encrypted == nil {
+						return nil, invalidResponse("agent_message encrypted_content requires a string")
+					}
+				default:
+					return nil, invalidResponse("Unsupported agent_message content type")
+				}
+			}
+			continue
 		case "additional_tools":
 			var item struct{ Tools []json.RawMessage }
 			if i.Role != "developer" || json.Unmarshal(v, &item) != nil || item.Tools == nil {
