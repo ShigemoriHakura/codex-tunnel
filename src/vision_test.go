@@ -95,3 +95,24 @@ func TestChatReasoningMetadata(t *testing.T) {
 		t.Fatal("incorrect public transcript")
 	}
 }
+
+func TestChatAssistantContinuation(t *testing.T) {
+	msgs := []chatMessage{
+		{Role: "user", Content: json.RawMessage(`"fixture question"`)},
+		{Role: "assistant", Content: json.RawMessage(`"fixture answer"`)},
+	}
+	if !chatMessagesCanEndTurn(msgs) {
+		t.Fatal("assistant history cannot be used as a continuation")
+	}
+	chat, err := chatResponseRequest(msgs, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var turn turn
+	if err := turn.responseInput(chat.input); err != nil {
+		t.Fatal(err)
+	}
+	if len(turn.history) != 2 || len(turn.input) != 0 {
+		t.Fatalf("unexpected continuation context: history=%d input=%d", len(turn.history), len(turn.input))
+	}
+}

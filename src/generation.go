@@ -138,8 +138,8 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		if !boundedBody(w, r, &b, chatBodyLimit) {
 			return
 		}
-		if len(b.Messages) < 1 || len(b.Messages) > 256 || b.Messages[len(b.Messages)-1].Role != "user" {
-			fail(w, 400, "invalid_messages", "Provide 1–256 messages ending with a user message")
+		if len(b.Messages) < 1 || len(b.Messages) > 256 || !chatMessagesCanEndTurn(b.Messages) {
+			fail(w, 400, "invalid_messages", "Provide 1–256 messages ending with a user or assistant message")
 			return
 		}
 		if sid != "" && len(b.Messages) != 1 && boundSession(r) == "" {
@@ -531,4 +531,16 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request, owner string) {
 		return
 	}
 	deliveryErr = reply.finishJSON(M{"id": rid, "object": "chat.completion", "created": start.Unix(), "model": model, "choices": []M{{"index": 0, "message": message{"assistant", res.text}, "finish_reason": "stop"}}, "usage": usage})
+}
+
+func chatMessagesCanEndTurn(messages []chatMessage) bool {
+	if len(messages) == 0 {
+		return false
+	}
+	switch messages[len(messages)-1].Role {
+	case "user", "assistant":
+		return true
+	default:
+		return false
+	}
 }
