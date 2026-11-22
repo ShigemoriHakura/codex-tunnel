@@ -258,6 +258,17 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 			// Hosted activity is displayed by the client. Its remote item ID cannot
 			// be resolved in the fresh CLI thread used for a continuation.
 			continue
+		case "item_reference":
+			// Responses clients may use an item reference when replaying a stored
+			// transcript. The gateway reconstructs its own history, so the remote
+			// reference has no corresponding item in the fresh CLI thread.
+			var item struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(v, &item) != nil || item.ID == "" {
+				return nil, invalidResponse("item_reference requires an id")
+			}
+			continue
 		case "additional_tools":
 			var item struct{ Tools []json.RawMessage }
 			if i.Role != "developer" || json.Unmarshal(v, &item) != nil || item.Tools == nil {
@@ -282,7 +293,7 @@ func parseResponses(f responseFields) (*responsesRequest, error) {
 				return nil, invalidResponse("function_call requires a call_id and name")
 			}
 		default:
-			return nil, invalidResponse("Unsupported input item type")
+			return nil, invalidResponse("Unsupported input item type " + i.Type)
 		}
 		replay = append(replay, v)
 	}

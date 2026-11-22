@@ -18,7 +18,7 @@ import (
 func TestResponsesValidation(t *testing.T) {
 	a := testApp(t, t.TempDir())
 	key, _ := newKey(t, a)
-	for _, body := range []string{`{}`, `{"model":"fixture","input":[{"type":"item_reference","id":"shared"}]}`, `{"model":"fixture","input":"x","tools":[{"type":"file_search"}]}`, `{"model":"fixture","input":[{"role":"user","content":[{"type":"input_image","file_id":"other"}]}]}`, `{"model":"fixture","input":"x","background":true}`} {
+	for _, body := range []string{`{}`, `{"model":"fixture","input":[{"type":"item_reference"}]}`, `{"model":"fixture","input":"x","tools":[{"type":"file_search"}]}`, `{"model":"fixture","input":[{"role":"user","content":[{"type":"input_image","file_id":"other"}]}]}`, `{"model":"fixture","input":"x","background":true}`} {
 		hit(t, a, "POST", "/v1/responses", key, body, "", 400)
 	}
 	hit(t, a, "POST", "/v1/responses", "bad", `{}`, "", 401)
@@ -201,6 +201,9 @@ func TestResponsesReasoningHistory(t *testing.T) {
 		if _, err := parse([]M{item}); err == nil {
 			t.Fatal("reasoning history alone started a turn")
 		}
+	}
+	if b, err := parse([]M{{"type": "item_reference", "id": "rs_fixture"}, {"role": "user", "content": "continue"}}); err != nil || len(b.input) != 1 || prop(string(b.input[0]), "role") != "user" {
+		t.Fatalf("item_reference was not safely skipped: %v", err)
 	}
 	for _, item := range []M{
 		{"type": "reasoning", "summary": []M{{"type": "summary_text"}}},
