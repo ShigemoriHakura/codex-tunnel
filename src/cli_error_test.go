@@ -9,6 +9,7 @@ func TestCliCapacityErrorsBecomeImmediateUpstreamUnavailable(t *testing.T) {
 	cases := []cliTurnError{
 		{Message: "Selected model is at capacity. Please try a different model."},
 		{Message: "Policy-restricted capacity is unavailable. Please try again later."},
+		{Message: "Reconnecting... 1/5", Details: "Selected model is at capacity. Please try a different model."},
 		{Message: `{"error":{"code":"model_at_capacity"}}`},
 	}
 	for _, detail := range cases {

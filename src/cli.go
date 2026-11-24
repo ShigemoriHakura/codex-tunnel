@@ -503,6 +503,7 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 type cliTurnError struct {
 	Info    json.RawMessage `json:"codexErrorInfo"`
 	Message string
+	Details string `json:"additionalDetails"`
 }
 
 var errCapacityUnavailable = &responsesError{503, "upstream_unavailable", "The selected model is currently at capacity. Try again later or choose another model."}
@@ -525,11 +526,13 @@ func (e cliTurnError) isCyberPolicy() bool {
 
 func (e cliTurnError) isCapacityUnavailable() bool {
 	provider := e.providerError()
-	message := strings.ToLower(strings.TrimSpace(e.Message))
-	if strings.Contains(message, "selected model is at capacity") ||
-		strings.Contains(message, "policy-restricted capacity is unavailable") ||
-		strings.Contains(message, "flex capacity unavailable") {
-		return true
+	for _, raw := range []string{e.Message, e.Details} {
+		message := strings.ToLower(strings.TrimSpace(raw))
+		if strings.Contains(message, "selected model is at capacity") ||
+			strings.Contains(message, "policy-restricted capacity is unavailable") ||
+			strings.Contains(message, "flex capacity unavailable") {
+			return true
+		}
 	}
 	return provider.Code == "server_overloaded" || provider.Code == "model_at_capacity" || provider.Code == "policy_capacity_unavailable"
 }
