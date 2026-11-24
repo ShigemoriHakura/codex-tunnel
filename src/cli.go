@@ -506,7 +506,7 @@ type cliTurnError struct {
 	Details string `json:"additionalDetails"`
 }
 
-var errCapacityUnavailable = &responsesError{503, "upstream_unavailable", "The selected model is currently at capacity. Try again later or choose another model."}
+var errCapacityUnavailable = &responsesError{503, "upstream_unavailable", "Selected model is at capacity. Please try a different model."}
 
 type providerErrorDetail struct{ Code, Type, Param, Message string }
 
