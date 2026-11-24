@@ -382,6 +382,14 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			if n.TurnID == turnID && n.Error.isCyberPolicy() {
 				return errCyberPolicy
 			}
+			// The app-server emits transient stream errors while it is retrying a
+			// sampling request. A model-capacity response is already terminal for
+			// this gateway request, however. Waiting for the CLI's long retry
+			// schedule causes the downstream proxy to close the connection and
+			// turns a useful upstream 503 into a misleading 499.
+			if n.TurnID == turnID && n.Error.isCapacityUnavailable() {
+				return errCapacityUnavailable
+			}
 		case "model/rerouted":
 			if n.TurnID == turnID && n.Reason == "highRiskCyberActivity" {
 				return errCyberPolicy
@@ -497,6 +505,8 @@ type cliTurnError struct {
 	Message string
 }
 
+var errCapacityUnavailable = &responsesError{503, "upstream_unavailable", "The selected model is currently at capacity. Try again later or choose another model."}
+
 type providerErrorDetail struct{ Code, Type, Param, Message string }
 
 // Some upstream HTTP and WebSocket errors arrive as "other", with the
@@ -513,9 +523,23 @@ func (e cliTurnError) isCyberPolicy() bool {
 	return string(e.Info) == `"cyberPolicy"` || e.providerError().Code == "cyber_policy"
 }
 
+func (e cliTurnError) isCapacityUnavailable() bool {
+	provider := e.providerError()
+	message := strings.ToLower(strings.TrimSpace(e.Message))
+	if strings.Contains(message, "selected model is at capacity") ||
+		strings.Contains(message, "policy-restricted capacity is unavailable") ||
+		strings.Contains(message, "flex capacity unavailable") {
+		return true
+	}
+	return provider.Code == "server_overloaded" || provider.Code == "model_at_capacity" || provider.Code == "policy_capacity_unavailable"
+}
+
 func cliTurnFailure(status string, detail cliTurnError) error {
 	if detail.isCyberPolicy() {
 		return errCyberPolicy
+	}
+	if detail.isCapacityUnavailable() {
+		return errCapacityUnavailable
 	}
 	provider := detail.providerError()
 	if (string(detail.Info) == `"other"` || len(detail.Info) == 0 || string(detail.Info) == "null") && provider.Type == "invalid_request_error" {
