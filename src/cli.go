@@ -374,7 +374,8 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 		if e := json.Unmarshal(v.Params, &n); e != nil {
 			return e
 		}
-		if n.ThreadID != thread || (n.TurnID != "" && n.TurnID != turnID) {
+		if n.ThreadID != thread ||
+			(n.TurnID != "" && n.TurnID != turnID && !(v.Method == "error" && n.Error.isCapacityUnavailable())) {
 			return nil
 		}
 		switch v.Method {
@@ -387,7 +388,7 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			// this gateway request, however. Waiting for the CLI's long retry
 			// schedule causes the downstream proxy to close the connection and
 			// turns a useful upstream 503 into a misleading 499.
-			if n.TurnID == turnID && n.Error.isCapacityUnavailable() {
+			if n.Error.isCapacityUnavailable() {
 				return errCapacityUnavailable
 			}
 		case "model/rerouted":
@@ -501,9 +502,10 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 }
 
 type cliTurnError struct {
-	Info    json.RawMessage `json:"codexErrorInfo"`
-	Message string
-	Details string `json:"additionalDetails"`
+	Info          json.RawMessage `json:"codexErrorInfo"`
+	Message       string
+	Details       string `json:"additionalDetails"`
+	LegacyDetails string `json:"additional_details"`
 }
 
 var errCapacityUnavailable = &responsesError{503, "upstream_unavailable", "Selected model is at capacity. Please try a different model."}
@@ -526,7 +528,7 @@ func (e cliTurnError) isCyberPolicy() bool {
 
 func (e cliTurnError) isCapacityUnavailable() bool {
 	provider := e.providerError()
-	for _, raw := range []string{e.Message, e.Details} {
+	for _, raw := range []string{e.Message, e.Details, e.LegacyDetails} {
 		message := strings.ToLower(strings.TrimSpace(raw))
 		if strings.Contains(message, "selected model is at capacity") ||
 			strings.Contains(message, "policy-restricted capacity is unavailable") ||
