@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 )
+
+const responsesStreamIdleTimeout = 4 * time.Minute
 
 // Responses history is keyed by the gateway's response IDs. Replaying the
 // selected branch in an ephemeral CLI thread also supports pre-migration rows.
@@ -45,6 +48,7 @@ func (s *responseStream) envelope(status string, usage any) responseFields {
 func (a *app) runResponses(ctx context.Context, run runner, b *responsesRequest, items responseItems, s *responseStream, chatDelta func(string) error) (result, error) {
 	t := b.options
 	t.model = b.model
+	t.streamIdle = responsesStreamIdleTimeout
 	if err := t.responseInput(items); err != nil {
 		return result{}, err
 	}

@@ -223,6 +223,7 @@ type result struct {
 }
 type turn struct {
 	thread, model  string
+	streamIdle     time.Duration
 	input          []turnInput
 	persist, image bool
 	imageModel     string
@@ -374,8 +375,9 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 		if e := json.Unmarshal(v.Params, &n); e != nil {
 			return e
 		}
-		if n.ThreadID != thread ||
-			(n.TurnID != "" && n.TurnID != turnID && !(v.Method == "error" && n.Error.isCapacityUnavailable())) {
+		transientStreamError := v.Method == "error" && (n.Error.isCapacityUnavailable() || n.Error.isTransientStreamError())
+		if (n.ThreadID != thread && !transientStreamError) ||
+			(n.TurnID != "" && n.TurnID != turnID && !transientStreamError) {
 			return nil
 		}
 		switch v.Method {
@@ -390,6 +392,9 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 			// turns a useful upstream 503 into a misleading 499.
 			if n.Error.isCapacityUnavailable() {
 				return errCapacityUnavailable
+			}
+			if n.Error.isTransientStreamError() {
+				return errStreamUnavailable
 			}
 		case "model/rerouted":
 			if n.TurnID == turnID && n.Reason == "highRiskCyberActivity" {
@@ -472,8 +477,17 @@ func (r runner) run(ctx context.Context, servers *appServers, t turn) (res resul
 	}
 	turnID = started.Turn.ID
 	for !done {
-		v, e := inbox.next(ctx, p.ctx)
+		waitCtx := ctx
+		cancelWait := func() {}
+		if t.streamIdle > 0 {
+			waitCtx, cancelWait = context.WithTimeout(ctx, t.streamIdle)
+		}
+		v, e := inbox.next(waitCtx, p.ctx)
+		cancelWait()
 		if e != nil {
+			if errors.Is(e, context.DeadlineExceeded) && ctx.Err() == nil && p.ctx.Err() == nil {
+				return res, errStreamUnavailable
+			}
 			return res, e
 		}
 		if v.Method == "item/tool/call" && t.onTool != nil {
@@ -509,6 +523,7 @@ type cliTurnError struct {
 }
 
 var errCapacityUnavailable = &responsesError{503, "upstream_unavailable", "Selected model is at capacity. Please try a different model."}
+var errStreamUnavailable = &responsesError{503, "upstream_unavailable", "The upstream response stream disconnected before completion. Please try again."}
 
 type providerErrorDetail struct{ Code, Type, Param, Message string }
 
@@ -539,12 +554,27 @@ func (e cliTurnError) isCapacityUnavailable() bool {
 	return provider.Code == "server_overloaded" || provider.Code == "model_at_capacity" || provider.Code == "policy_capacity_unavailable"
 }
 
+func (e cliTurnError) isTransientStreamError() bool {
+	for _, raw := range []string{e.Message, e.Details, e.LegacyDetails} {
+		message := strings.ToLower(strings.TrimSpace(raw))
+		if strings.HasPrefix(message, "reconnecting") ||
+			strings.Contains(message, "stream disconnected") ||
+			strings.Contains(message, "idle timeout waiting for sse") {
+			return true
+		}
+	}
+	return false
+}
+
 func cliTurnFailure(status string, detail cliTurnError) error {
 	if detail.isCyberPolicy() {
 		return errCyberPolicy
 	}
 	if detail.isCapacityUnavailable() {
 		return errCapacityUnavailable
+	}
+	if detail.isTransientStreamError() {
+		return errStreamUnavailable
 	}
 	provider := detail.providerError()
 	if (string(detail.Info) == `"other"` || len(detail.Info) == 0 || string(detail.Info) == "null") && provider.Type == "invalid_request_error" {

@@ -33,6 +33,17 @@ func TestCliCapacityErrorDoesNotTreatCyberTextAsCapacity(t *testing.T) {
 	}
 }
 
+func TestCliTransientStreamErrorMapsToUnavailable(t *testing.T) {
+	detail := cliTurnError{Message: "Reconnecting... 1/5"}
+	if !detail.isTransientStreamError() {
+		t.Fatal("transient stream error was not recognized")
+	}
+	var got *responsesError
+	if !errors.As(cliTurnFailure("failed", detail), &got) || got != errStreamUnavailable {
+		t.Fatalf("unexpected mapped error: %#v", cliTurnFailure("failed", detail))
+	}
+}
+
 func TestCapacityNotificationEndsResponsesTurn(t *testing.T) {
 	a := testApp(t, t.TempDir())
 	key, _ := newKey(t, a)
